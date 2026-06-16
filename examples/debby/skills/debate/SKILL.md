@@ -43,13 +43,13 @@ user ("debate this for 3 rounds"); otherwise run 1.
 
 3. **Converge.** After the final round, write the synthesis yourself:
 
-       ## 🟠 Claude — final
+       ## 🔴 Claude — final
        <Claude's last answer, lightly trimmed>
 
        ## 🔵 GPT — final
        <GPT's last answer, lightly trimmed>
 
-       ## 🟣 Gemini — final
+       ## 🟢 Gemini — final
        <Gemini's last answer, lightly trimmed>
 
        ## How the debate moved them
@@ -61,11 +61,23 @@ user ("debate this for 3 rounds"); otherwise run 1.
         flagging any genuine remaining disagreement rather than papering
         over it>
 
+## Handling fewer than three agents
+
+If only two agents are configured (e.g., Claude and GPT, missing Gemini), adapt
+the procedure gracefully:
+
+- **Round 0:** Collect answers from the available agents only.
+- **Debate rounds:** Each available agent critiques the other(s). If only two are
+  configured, this becomes a pairwise debate (each agent critiques one other).
+- **Convergence:** Show only the available agents' final answers and synthesis.
+  Adjust the "How the debate moved them" and "Synthesis" sections to reflect
+  the number of voices actually present.
+
 ## Notes
 
 - Keep it even-handed. You are the moderator, not a fourth debater — your own
   opinion enters only in the Synthesis, and even there it is a synthesis of
-  the three, not a new position.
+  the voices present, not a new position.
 - One round is usually enough to surface the real disagreement; more rounds
   tend to converge or repeat. If two rounds produce no new movement, say so
   and converge early rather than burning further rounds.
