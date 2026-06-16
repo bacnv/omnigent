@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import collections
 import enum
+import importlib.util
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -1008,6 +1010,92 @@ async def test_tool_parameters_reach_sdk_declaration(monkeypatch: pytest.MonkeyP
     assert sdk_tool.input_schema == schema
     # The wrapped callable still routes through the bridge (kwargs form).
     assert await sdk_tool(cmd="ls") == {"ok": True}
+
+
+# Skip the real-SDK serialization gate when ``google.antigravity`` isn't
+# installed (it's an optional, Gemini-native dependency). Unlike the fake-SDK
+# tests above, this one drives the *actual* SDK so it can only run with the
+# package present.
+_requires_real_sdk = pytest.mark.skipif(
+    importlib.util.find_spec("google.antigravity") is None,
+    reason="google.antigravity SDK not importable (optional Gemini-native dependency)",
+)
+
+
+@_requires_real_sdk
+@pytest.mark.asyncio
+async def test_parameters_schema_reaches_sdk_tool_proto() -> None:
+    """Headline (#279): a bridged tool's ``parameters`` survive the real SDK serialization.
+
+    The fake-SDK test above proves ``_build_sdk_tools`` *attaches* the schema as
+    ``ToolWithSchema.input_schema``. This goes one layer deeper against the
+    **real** ``google.antigravity`` SDK: it feeds the executor's actual
+    ``_build_sdk_tools`` output through the SDK's own
+    ``callable_to_tool_proto`` — the exact serializer that builds the tool
+    declaration Gemini sees — and asserts the emitted
+    ``parameters_json_schema`` carries the declared properties and ``required``
+    list, NOT the degenerate empty ``{"type": "OBJECT"}``.
+
+    This is the deterministic proof that needs no live model: pre-#279
+    ``_build_sdk_tools`` returned a bare ``_invoke(*args, **kwargs)`` callable,
+    which ``callable_to_tool_proto`` runs through ``FunctionDeclaration``
+    signature introspection — yielding ``{"type": "OBJECT"}`` because the
+    bridge callable has no typed parameters (the negative half of this test
+    asserts exactly that). The fix wraps the callable in ``ToolWithSchema`` so
+    the serializer takes the explicit-schema branch and emits the spec's schema
+    verbatim.
+    """
+    import google.antigravity as antigravity
+    from google.antigravity.connections.local import local_connection
+    from google.antigravity.tools.tool_runner import ToolWithSchema
+
+    executor = AntigravityExecutor()
+
+    async def _fake_tool_executor(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True}
+
+    executor._tool_executor = _fake_tool_executor
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "player": {"type": "string", "description": "The player's name."},
+            "score": {"type": "integer", "description": "The integer score."},
+        },
+        "required": ["player", "score"],
+    }
+    sdk_tools = executor._build_sdk_tools(
+        antigravity,
+        [{"name": "record_score", "description": "Record a score.", "parameters": schema}],
+    )
+
+    # Build path: the schema-bearing spec is wrapped in the real SDK
+    # ToolWithSchema (not a bare callable).
+    assert len(sdk_tools) == 1
+    assert isinstance(sdk_tools[0], ToolWithSchema)
+
+    # Serialize through the SDK's own proto builder — the code path that
+    # produces the tool declaration sent to Gemini.
+    proto = local_connection.callable_to_tool_proto(sdk_tools[0])
+    assert proto.name == "record_score"
+    emitted = json.loads(proto.parameters_json_schema)
+    # The full structured schema reaches the proto — properties + required —
+    # NOT the empty {"type": "OBJECT"} the pre-fix bare callable produced.
+    assert emitted != {"type": "OBJECT"}
+    assert set(emitted.get("properties", {})) == {"player", "score"}
+    assert emitted.get("required") == ["player", "score"]
+    assert emitted["properties"]["score"]["type"] == "integer"
+
+    # Negative half — proves the assertion above is load-bearing and the empty
+    # schema is exactly what the *pre-fix* path emits. A bare bridge callable
+    # (what _build_sdk_tools returned before #279, reproduced here via the same
+    # _make_tool_callable factory) serializes to the degenerate {"type":
+    # "OBJECT"} because callable_to_tool_proto then falls back to signature
+    # introspection of _invoke(*args, **kwargs), which has no typed params.
+    bare_callable = executor._make_tool_callable("record_score", "Record a score.")
+    assert not isinstance(bare_callable, ToolWithSchema)
+    bare_proto = local_connection.callable_to_tool_proto(bare_callable)
+    assert json.loads(bare_proto.parameters_json_schema) == {"type": "OBJECT"}
 
 
 @pytest.mark.asyncio
