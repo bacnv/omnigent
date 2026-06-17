@@ -1524,6 +1524,27 @@ def test_handle_create_dir_existing_returns_error_not_failed(tmp_path: Path) -> 
     assert result.path is None
 
 
+def test_handle_create_dir_leaf_is_file_reports_file_not_directory(tmp_path: Path) -> None:
+    """
+    Verify a regular file at the target path reports a file, not a
+    directory.
+
+    ``os.makedirs`` raises ``FileExistsError`` for both an existing
+    directory and an existing file; the handler must distinguish them
+    so the picker doesn't mislabel "a file is in the way" as
+    "directory already exists".
+    """
+    host = _make_host_process()
+    a_file = tmp_path / "taken"
+    a_file.write_text("hi")
+
+    result = host._handle_create_dir(HostCreateDirFrame(request_id="m3b", path=str(a_file)))
+
+    assert result.status == "ok"
+    assert result.error == "a file already exists at that path"
+    assert result.path is None
+
+
 def test_handle_create_dir_parent_is_file_returns_error(tmp_path: Path) -> None:
     """
     Verify creating under a path whose parent is a regular file returns

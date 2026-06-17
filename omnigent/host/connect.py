@@ -1084,10 +1084,19 @@ class HostProcess:
             # should tell the user the name is taken.
             os.makedirs(expanded, exist_ok=False)
         except FileExistsError:
+            # makedirs raises FileExistsError whether the leaf is an
+            # existing directory or a regular file. Distinguish the two
+            # so "name is taken by a file" isn't mislabelled as an
+            # existing directory.
+            error = (
+                "directory already exists"
+                if os.path.isdir(expanded)
+                else "a file already exists at that path"
+            )
             return HostCreateDirResultFrame(
                 request_id=frame.request_id,
                 status="ok",
-                error="directory already exists",
+                error=error,
             )
         except NotADirectoryError:
             return HostCreateDirResultFrame(
