@@ -230,11 +230,7 @@ def test_parallel_sub_agents_e2e(
             {"text": "Dispatched both sub-agents, waiting."},
             {"text": "Research done. RESEARCHER_MARKER_2025"},
             {"text": "Summary done. SUMMARIZER_MARKER_2025"},
-            {
-                "text": (
-                    "Results: RESEARCHER_MARKER_2025 and SUMMARIZER_MARKER_2025"
-                )
-            },
+            {"text": ("Results: RESEARCHER_MARKER_2025 and SUMMARIZER_MARKER_2025")},
         ],
         key="default",
     )

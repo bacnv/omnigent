@@ -186,8 +186,7 @@ def test_subagent_completion_auto_wakes_idle_parent(
         f"{session_id} after the dispatch turn ended."
     )
     assert marker_seen, (
-        f"Researcher marker {_RESEARCHER_MARKER!r} never surfaced in session "
-        f"{session_id}."
+        f"Researcher marker {_RESEARCHER_MARKER!r} never surfaced in session {session_id}."
     )
 
 
