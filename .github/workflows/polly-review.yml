@@ -355,13 +355,6 @@ jobs:
           client-id: ${{ vars.OMNIGENT_BOT_APP_ID }}
           private-key: ${{ secrets.OMNIGENT_BOT_APP_KEY }}
 
-      - name: Pre-cache tiktoken encodings
-        # tiktoken fetches cl100k_base.tiktoken from openaipublic.blob.core.windows.net
-        # at first use. Pre-download it now (before the iptables DROP rule) so
-        # the Polly run doesn't hit a network error resolving that host.
-        if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
-        run: uv run python3 -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
-
       - name: Restrict egress to gateway and GitHub API
         # Use iptables to enforce egress at the kernel level — simpler and
         # more reliable than bwrap egress_rules, which requires a sandbox
@@ -385,6 +378,8 @@ jobs:
           sudo iptables -I OUTPUT 2 -o lo -j ACCEPT
           # Allow GitHub API (gh CLI for PR diff / context).
           sudo iptables -A OUTPUT -d api.github.com -j ACCEPT
+          # Allow tiktoken encoding downloads (cl100k_base etc).
+          sudo iptables -A OUTPUT -d openaipublic.blob.core.windows.net -j ACCEPT
           # Allow gateway (LLM calls).
           if [ -n "$GW_HOST" ]; then
             sudo iptables -A OUTPUT -d "$GW_HOST" -j ACCEPT
@@ -392,7 +387,7 @@ jobs:
           # Drop all other outbound traffic.
           sudo iptables -A OUTPUT -j DROP
 
-          echo "Egress restricted to: api.github.com${GW_HOST:+, $GW_HOST} + loopback"
+          echo "Egress restricted to: api.github.com, openaipublic.blob.core.windows.net${GW_HOST:+, $GW_HOST} + loopback"
 
       - name: Run Polly review
         if: steps.trigger.outputs.skip != 'true' && steps.creds.outputs.available == 'true'
