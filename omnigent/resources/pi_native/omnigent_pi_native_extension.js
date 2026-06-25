@@ -1,6 +1,50 @@
 // Auto-generated Omnigent bridge extension for native Pi sessions.
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+
+// Tuning for the TOOL_CALL policy long-poll (see evalNativePolicyHttp).
+//
+// The server's POST /policies/evaluate parks an ASK verdict server-side
+// (URL-based elicitation) and holds the connection open until a human
+// resolves it via the web UI, then returns a hard ALLOW/DENY — the same
+// contract the Claude Code / Codex / Cursor native hooks rely on
+// (omnigent.native_policy_hook.post_evaluate_with_retry, ~1-day client
+// read budget). Node's global fetch (undici) caps a connection that
+// receives no response headers at headersTimeout (~5 min by default), so
+// a long human wait would sever the park mid-flight. We therefore bound
+// each attempt with an AbortController well under that cap and, on the
+// resulting abort (or a transient 5xx / connect error), re-POST the SAME
+// _omnigent_elicitation_id so the server RE-ATTACHES to the existing
+// parked elicitation instead of publishing a second approval card. This
+// mirrors the re-attach idiom in post_evaluate_with_retry while staying
+// resilient to undici's header timeout.
+//
+// _PARK_ATTEMPT_TIMEOUT_MS — per-request abort budget; kept under undici's
+//   ~300s headersTimeout default so a parked request is retried (re-attach)
+//   rather than failing as UND_ERR_HEADERS_TIMEOUT.
+// _PARK_TOTAL_BUDGET_MS — overall ceiling on the park loop. The human-wait
+//   itself is capped server-side by the deciding policy's ask_timeout, so
+//   this is a long backstop that keeps a wedged client from waiting forever.
+const _PARK_ATTEMPT_TIMEOUT_MS = 240_000;
+const _PARK_TOTAL_BUDGET_MS = 86_400_000;
+// Budget for retrying genuinely transient transport errors (connect
+// refused / reset / 5xx) before failing OPEN. Distinct from the long park
+// budget: a server that is actually down should let Pi proceed quickly
+// rather than hang, so the transient-error budget is short.
+const _TRANSIENT_RETRY_BUDGET_MS = 30_000;
+const _TRANSIENT_RETRY_INITIAL_BACKOFF_MS = 1_000;
+const _TRANSIENT_RETRY_MAX_BACKOFF_MS = 10_000;
+
+function mintEvaluateElicitationId() {
+  // Namespaced + 32 lowercase hex chars to satisfy the server's
+  // _EVALUATE_HOOK_ELICITATION_ID_RE (^elicit_evaluate_[0-9a-f]{32}$).
+  return `elicit_evaluate_${crypto.randomBytes(16).toString("hex")}`;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function readConfig() {
   const configPath = process.env.OMNIGENT_PI_NATIVE_CONFIG;
@@ -16,11 +60,34 @@ function readConfig() {
  * Evaluate a TOOL_CALL policy for a native Pi tool via the Omnigent server's
  * session-level HTTP endpoint (POST /v1/sessions/{sessionId}/policies/evaluate).
  *
- * This is the same endpoint used by the Claude Code and Codex native hooks.
- * It does NOT require an active Omnigent turn context on the harness side —
- * the endpoint evaluates against the session's full policy set directly.
- * Fail-open (null) on any transport or parse error so a transient server
- * outage never wedges Pi mid-turn.
+ * This is the same endpoint used by the Claude Code, Codex, and Cursor native
+ * hooks. It does NOT require an active Omnigent turn context on the harness
+ * side — the endpoint evaluates against the session's full policy set directly.
+ *
+ * Verdict handling (parity with the native hooks):
+ *   - POLICY_ACTION_DENY  → block the Pi tool call with the policy reason.
+ *   - POLICY_ACTION_ALLOW / UNSPECIFIED (the engine default when no policy
+ *       matches) → proceed.
+ *   - POLICY_ACTION_ASK   → the server resolves ASK by PARKING this request
+ *       (URL-based elicitation: it publishes an approval card to the web UI
+ *       and holds the connection until a human resolves it), then returns a
+ *       hard ALLOW/DENY — so a writable session never observes a raw ASK here.
+ *       The park is realized by a generous client read budget plus re-attach
+ *       retries (see the _PARK_* tuning above): if undici severs a long park
+ *       (headersTimeout) or a transient 5xx / connect error drops it, we
+ *       re-POST the SAME _omnigent_elicitation_id so the server re-attaches to
+ *       the existing elicitation instead of opening a second approval card. If
+ *       a raw ASK ever does come back (e.g. a read-only caller, which cannot
+ *       park), we keep re-evaluating until it collapses to ALLOW/DENY.
+ *
+ * Fail-open (null) on transport/parse errors once the transient-retry budget
+ * is exhausted, so a genuine server outage never wedges Pi mid-turn. This
+ * matches the Cursor native hook's fail-open posture (the Claude/Codex hooks
+ * fail closed because they are the sole tool gate; pi-native deliberately
+ * favors keeping the TUI responsive).
+ *
+ * @returns {Promise<{block: boolean, reason: string} | null>} A verdict, or
+ *   null to fail open (proceed) when no usable verdict could be obtained.
  */
 async function evalNativePolicyHttp(config, toolName, args) {
   if (
@@ -31,6 +98,11 @@ async function evalNativePolicyHttp(config, toolName, args) {
   )
     return null;
   const url = `${config.serverUrl}/v1/sessions/${encodeURIComponent(config.sessionId)}/policies/evaluate`;
+  // Mint one stable re-attach id for this tool call. Every (re)POST carries
+  // it so a re-park lands on the SAME elicitation — no duplicate approval
+  // card. Kept for the whole call, across both the park loop and any
+  // transient-error retries.
+  const elicitationId = mintEvaluateElicitationId();
   const body = JSON.stringify({
     event: {
       type: "PHASE_TOOL_CALL",
@@ -38,22 +110,111 @@ async function evalNativePolicyHttp(config, toolName, args) {
       data: { name: toolName, arguments: args },
       context: {},
     },
+    _omnigent_elicitation_id: elicitationId,
   });
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", ...(config.authHeaders || {}) },
-      body,
-    });
-    if (!resp.ok) return null;
-    const json = await resp.json();
-    if (json.result === "POLICY_ACTION_DENY") {
-      return { block: true, reason: json.reason || "blocked by Omnigent policy" };
+  const reqHeaders = {
+    "content-type": "application/json",
+    ...(config.authHeaders || {}),
+  };
+
+  const parkDeadline = Date.now() + _PARK_TOTAL_BUDGET_MS;
+  // Independent transient-error budget so a server that is actually down
+  // fails open quickly instead of riding the long park ceiling.
+  let transientDeadline = Date.now() + _TRANSIENT_RETRY_BUDGET_MS;
+  let transientBackoff = _TRANSIENT_RETRY_INITIAL_BACKOFF_MS;
+
+  while (true) {
+    if (Date.now() >= parkDeadline) {
+      // Park budget exhausted (well past any sane ask_timeout). Fail open so
+      // a wedged gate cannot block the TUI forever.
+      return null;
     }
+    // AbortController bounds each attempt under undici's headersTimeout so a
+    // long park is retried (re-attach) rather than thrown as a header
+    // timeout. AbortSignal.timeout would be terser but is newer; this form
+    // works on every Node that ships global fetch.
+    const controller =
+      typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(() => controller.abort(), _PARK_ATTEMPT_TIMEOUT_MS)
+      : null;
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: "POST",
+        headers: reqHeaders,
+        body,
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+    } catch (_err) {
+      // Aborted park (our own timeout) → re-attach immediately; the server
+      // is still holding the elicitation. A genuine transport error (connect
+      // refused / reset) → retry within the short transient budget, then fail
+      // open. We cannot reliably tell an abort from a connect error across
+      // Node versions, so treat an in-park abort as a re-attach (no backoff)
+      // and any other error against the transient budget.
+      if (timer) clearTimeout(timer);
+      const aborted = controller && controller.signal.aborted;
+      if (aborted) {
+        // Re-park: loop again immediately with the same elicitation id.
+        continue;
+      }
+      if (Date.now() + transientBackoff >= transientDeadline) {
+        return null; // Fail open: server unreachable.
+      }
+      await sleep(transientBackoff);
+      transientBackoff = Math.min(
+        transientBackoff * 2,
+        _TRANSIENT_RETRY_MAX_BACKOFF_MS,
+      );
+      continue;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+
+    if (!resp.ok) {
+      // 5xx is transient (retry within budget, re-attaching); 4xx is final
+      // (a bad request won't succeed on retry) → fail open.
+      if (resp.status >= 500) {
+        if (Date.now() + transientBackoff >= transientDeadline) return null;
+        await sleep(transientBackoff);
+        transientBackoff = Math.min(
+          transientBackoff * 2,
+          _TRANSIENT_RETRY_MAX_BACKOFF_MS,
+        );
+        continue;
+      }
+      return null;
+    }
+
+    let json;
+    try {
+      json = await resp.json();
+    } catch (_err) {
+      // Malformed body — not retryable. Fail open.
+      return null;
+    }
+
+    const result = json && json.result;
+    if (result === "POLICY_ACTION_DENY") {
+      return {
+        block: true,
+        reason: json.reason || "blocked by Omnigent policy",
+      };
+    }
+    if (result === "POLICY_ACTION_ASK") {
+      // The gate did not park server-side (e.g. read-only access) yet still
+      // wants approval. Re-evaluate (re-attaching) until the server collapses
+      // it to a hard verdict; reset the transient budget since this is a
+      // healthy round-trip, not a failure, and give it a brief beat so we do
+      // not hot-loop a server that keeps returning ASK.
+      transientDeadline = Date.now() + _TRANSIENT_RETRY_BUDGET_MS;
+      transientBackoff = _TRANSIENT_RETRY_INITIAL_BACKOFF_MS;
+      await sleep(_TRANSIENT_RETRY_INITIAL_BACKOFF_MS);
+      continue;
+    }
+    // ALLOW / UNSPECIFIED / anything else → proceed.
     return { block: false, reason: "" };
-  } catch (_err) {
-    // Keep Pi responsive if Omnigent is temporarily unavailable.
-    return null;
   }
 }
 
@@ -587,7 +748,10 @@ module.exports = function (pi) {
       (event && event.input) || {},
     );
     if (verdict && verdict.block) {
-      return { block: true, reason: verdict.reason || "blocked by Omnigent policy" };
+      return {
+        block: true,
+        reason: verdict.reason || "blocked by Omnigent policy",
+      };
     }
   });
 
