@@ -36,15 +36,6 @@ const connectingHosts = new Map();
 /** { url, port, pid } when this app started the local server; null otherwise. */
 let ownedLocalServer = null;
 
-/**
- * URL of a local server we're confident is running — set when we start (or
- * reuse) one, or after a CLI status read confirms one. Lets serverStatusFor
- * report it instantly (no `omnigent server status` subprocess), which is what
- * makes the Local Server row appear immediately on a page refresh. Cleared when
- * the server is stopped.
- */
-let knownLocalServerUrl = null;
-
 /** Single listener notified when a host child's lifecycle changes (no polling). */
 let changeListener = null;
 
@@ -291,13 +282,11 @@ function stopChild(child) {
 async function startLocalServer(cliPath) {
   const before = await cli.getServerStatus(cliPath);
   if (before && before.running && typeof before.url === "string") {
-    knownLocalServerUrl = before.url;
     return { ok: true, url: before.url, alreadyRunning: true };
   }
   const res = await cli.startLocalServer(cliPath);
   if (res.ok) {
     ownedLocalServer = { url: res.url, port: res.port, pid: res.pid };
-    knownLocalServerUrl = res.url;
     return { ok: true, url: res.url };
   }
   return { ok: false, error: res.error };
@@ -314,7 +303,6 @@ async function stopOwnedLocalServer(cliPath) {
   if (!ownedLocalServer) return { ok: true, skipped: true };
   const res = await cli.stopLocalServer(cliPath);
   ownedLocalServer = null;
-  knownLocalServerUrl = null;
   return { ok: res.ok };
 }
 
@@ -328,7 +316,6 @@ async function stopOwnedLocalServer(cliPath) {
 async function stopLocalServer(cliPath) {
   const res = await cli.stopLocalServer(cliPath);
   ownedLocalServer = null;
-  knownLocalServerUrl = null;
   return { ok: res.ok, error: res.ok ? undefined : res.output };
 }
 
@@ -408,31 +395,17 @@ async function statusFor(cliPath, serverUrl) {
  */
 async function serverStatusFor(cliPath, serverUrl) {
   if (!cliPath || !cli.isLoopbackServer(serverUrl)) return null;
-  // Fast path: we already know a local server is running at this URL (we started
-  // it, or a prior status read confirmed it), so report it instantly without
-  // shelling out to `omnigent server status`. This is the common case after a
-  // page refresh — the main process and this cache survive renderer reloads.
-  if (knownLocalServerUrl && cli.sameLoopbackServer(knownLocalServerUrl, serverUrl)) {
-    return {
-      running: true,
-      url: knownLocalServerUrl,
-      pid: ownedLocalServer ? (ownedLocalServer.pid ?? null) : null,
-      ownedByDesktop: Boolean(ownedLocalServer),
-    };
-  }
-  const status = await cli.getServerStatus(cliPath);
-  const url = status && typeof status.url === "string" ? status.url : null;
-  // Only surface the local-server controls when the CLI's running local server
-  // is the one THIS window is connected to. Otherwise we'd be reporting an
-  // unrelated local server (e.g. the machine-global background server while the
-  // window is pointed at a different local port), so hide the row entirely.
-  if (!url || !cli.sameLoopbackServer(url, serverUrl)) return null;
-  // Remember it so subsequent reads (and refreshes) take the fast path above.
-  knownLocalServerUrl = url;
+  // Read the local-server pidfile (~/.omnigent/local_server.pid) directly — pid
+  // + port, then a pid-liveness check. Instant and always fresh: no `omnigent
+  // server status` subprocess, so the row appears immediately (incl. on a page
+  // refresh). Only surface controls when that server is the one THIS window is
+  // connected to (matching loopback port), not an unrelated background server.
+  const local = cli.localServerStatus();
+  if (!local || !cli.sameLoopbackServer(local.url, serverUrl)) return null;
   return {
-    running: Boolean(status.running),
-    url,
-    pid: typeof status.pid === "number" ? status.pid : null,
+    running: true,
+    url: local.url,
+    pid: local.pid,
     ownedByDesktop: Boolean(ownedLocalServer),
   };
 }

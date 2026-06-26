@@ -85,6 +85,79 @@ function sameLoopbackServer(a, b) {
 }
 
 /**
+ * The Omnigent local runtime data dir — `$OMNIGENT_DATA_DIR` (with `~`
+ * expanded) or `~/.omnigent`. Mirrors `_local_data_dir()` in
+ * omnigent/host/local_server.py. The local-server pidfile lives here.
+ *
+ * @returns {string}
+ */
+function localDataDir() {
+  const raw = process.env.OMNIGENT_DATA_DIR;
+  if (raw && raw.trim() !== "") {
+    const expanded = raw.startsWith("~") ? path.join(os.homedir(), raw.slice(1)) : raw;
+    return path.resolve(expanded);
+  }
+  return path.join(os.homedir(), ".omnigent");
+}
+
+/**
+ * Parse the local-server pidfile contents: two lines, PID then port. Returns
+ * null when malformed. Mirrors `_read_local_server_pid_file()` in
+ * omnigent/host/local_server.py.
+ *
+ * @param {string} text
+ * @returns {{ pid: number, port: number } | null}
+ */
+function parseLocalServerPidfile(text) {
+  if (typeof text !== "string") return null;
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.length < 2) return null;
+  const pid = Number.parseInt(lines[0], 10);
+  const port = Number.parseInt(lines[1], 10);
+  if (!Number.isFinite(pid) || !Number.isFinite(port)) return null;
+  return { pid, port };
+}
+
+/**
+ * True when a process with this pid exists. `process.kill(pid, 0)` sends no
+ * signal — it only probes existence: it throws ESRCH when gone, EPERM when the
+ * process exists but isn't ours (still alive).
+ *
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return Boolean(err) && err.code === "EPERM";
+  }
+}
+
+/**
+ * Local-server status read straight from the pidfile + a pid-liveness check —
+ * no `omnigent server status` subprocess, so it's instant. Returns null when no
+ * live local server is recorded. The CLI additionally probes `/health`; pid
+ * liveness is enough to drive the sidebar quickly (and you can only be viewing
+ * the page if the server is actually up).
+ *
+ * @returns {{ running: true, url: string, pid: number, port: number } | null}
+ */
+function localServerStatus() {
+  let text;
+  try {
+    text = fs.readFileSync(path.join(localDataDir(), "local_server.pid"), "utf8");
+  } catch {
+    return null;
+  }
+  const rec = parseLocalServerPidfile(text);
+  if (!rec || !isPidAlive(rec.pid)) return null;
+  return { running: true, url: `http://127.0.0.1:${rec.port}`, pid: rec.pid, port: rec.port };
+}
+
+/**
  * Well-known install locations for the `omnigent` binary, in priority order.
  * `uv tool install` (the documented installer) drops it in ~/.local/bin;
  * the rest cover Homebrew and source/cargo installs. Probing these matters
@@ -399,6 +472,9 @@ module.exports = {
   normalizeServerUrl,
   isLoopbackServer,
   sameLoopbackServer,
+  parseLocalServerPidfile,
+  isPidAlive,
+  localServerStatus,
   candidatePaths,
   isExecutableFile,
   whichOmnigent,

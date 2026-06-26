@@ -11,6 +11,7 @@ const {
   normalizeServerUrl,
   isLoopbackServer,
   sameLoopbackServer,
+  parseLocalServerPidfile,
   resolveCliPath,
   parseJsonLoose,
   matchesServer,
@@ -57,6 +58,20 @@ describe("sameLoopbackServer", () => {
   it("does not match when either side is remote, or on junk", () => {
     assert.equal(sameLoopbackServer("http://localhost:6767", "https://example.com:6767"), false);
     assert.equal(sameLoopbackServer("not a url", "http://localhost:6767"), false);
+  });
+});
+
+describe("parseLocalServerPidfile", () => {
+  it("parses pid then port", () => {
+    assert.deepEqual(parseLocalServerPidfile("12345\n6767\n"), { pid: 12345, port: 6767 });
+    assert.deepEqual(parseLocalServerPidfile("42\n8000"), { pid: 42, port: 8000 });
+  });
+
+  it("returns null for malformed contents", () => {
+    assert.equal(parseLocalServerPidfile("12345"), null); // only one line
+    assert.equal(parseLocalServerPidfile("abc\ndef"), null); // non-numeric
+    assert.equal(parseLocalServerPidfile(""), null);
+    assert.equal(parseLocalServerPidfile(null), null);
   });
 });
 
