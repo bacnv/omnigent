@@ -1520,10 +1520,10 @@ def test_overview_marks_unconfigured_with_x_and_configured_without_checkmark(
 
     Seeds only an Anthropic (Claude) default and leaves Codex with no
     credential. The overview must (1) drop the old green ✓ next to the
-    configured Claude name — the green ✓ now lives only on the summary default
-    line — and (2) mark the unconfigured Codex with a red ✗ plus the "no
-    credential yet" hint. A regression that restores the name-level ✓ or fails
-    to flag the empty harness surfaces here.
+    configured Claude name — the green ✓ now lives only on the status column —
+    and (2) mark the installed-but-unconfigured Codex with a ✗ "Not configured"
+    status. A regression that restores the name-level ✓ or fails to flag the
+    empty harness surfaces here.
     """
     config_path = os.path.join(isolated_config, "config.yaml")
     with open(config_path, "w") as f:
@@ -1551,9 +1551,9 @@ def test_overview_marks_unconfigured_with_x_and_configured_without_checkmark(
     # name — so "✓ Claude" never appears, but the credential's "✓ …" does.
     assert "✓ Claude" not in out
     assert "✓ Anthropic API Key" in out
-    # Unconfigured Codex: the row's status is a red ✗ "No credential".
+    # Installed-but-unconfigured Codex: the row's status is a ✗ "Not configured".
     assert "Codex" in out
-    assert "✗ No credential" in out
+    assert "✗ Not configured" in out
 
 
 def _capture_setup_overview(
@@ -1736,13 +1736,13 @@ def test_overview_status_color_distinguishes_missing_from_unconfigured(
     pin the color so a regression that, say, paints an absent CLI yellow (telling
     a user a missing tool is merely "unconfigured") fails.
     """
-    # Installed but no credential → yellow ✗ (a usable harness awaiting setup).
+    # Installed but unconfigured → yellow ✗ (a usable harness awaiting setup).
     monkeypatch.setattr(
         "omnigent.onboarding.harness_install.harness_cli_installed", lambda family: True
     )
     options, selectable, _descriptions, _compact = _capture_setup_overview(monkeypatch)
     codex = options[_overview_row_names(options, selectable).index("Codex")]
-    assert "[yellow]✗ No credential[/]" in codex
+    assert "[yellow]✗ Not configured[/]" in codex
 
     # CLI absent → red ✗ (nothing to use yet).
     monkeypatch.setattr(

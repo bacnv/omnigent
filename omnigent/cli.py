@@ -10967,7 +10967,7 @@ def _run_configure_harnesses_interactive() -> None:
             )
         default = surface_default_provider(config, fam)
         if default is None:
-            return (fam, name, "No credential", "warn", "Open to add a credential.")
+            return (fam, name, "Not configured", "warn", "Open to add a credential.")
         label = _family_credential_label(config, fam, default.name, default)
         return (fam, name, label, "ready", "")
 
@@ -10999,7 +10999,13 @@ def _run_configure_harnesses_interactive() -> None:
             )
         else:
             rows.append(
-                (CURSOR_KEY, "Cursor", "No API key", "warn", "Open to add the Cursor API key."),
+                (
+                    CURSOR_KEY,
+                    "Cursor",
+                    "Not configured",
+                    "warn",
+                    "Open to add the Cursor API key.",
+                ),
             )
 
         # OpenCode — its own provider auth (login or env keys); the status is
@@ -11022,7 +11028,7 @@ def _run_configure_harnesses_interactive() -> None:
                 (
                     _OPENCODE,
                     "OpenCode",
-                    "No provider",
+                    "Not configured",
                     "warn",
                     "Open to sign in (opencode auth login).",
                 ),
@@ -11073,7 +11079,7 @@ def _run_configure_harnesses_interactive() -> None:
                 (
                     _ANTIGRAVITY,
                     "Antigravity",
-                    "No Gemini key",
+                    "Not configured",
                     "warn",
                     "Open to add the Gemini API key.",
                 ),
@@ -11098,7 +11104,7 @@ def _run_configure_harnesses_interactive() -> None:
                 (
                     _QWEN,
                     "Qwen Code",
-                    "No auth",
+                    "Not configured",
                     "warn",
                     "Open to set up auth (/auth or env vars).",
                 ),
@@ -11119,7 +11125,7 @@ def _run_configure_harnesses_interactive() -> None:
                 rows.append((_GOOSE, "Goose", goose_summary.provider, "ready", ""))
             else:
                 rows.append(
-                    (_GOOSE, "Goose", "No provider", "warn", "Open to run `goose configure`."),
+                    (_GOOSE, "Goose", "Not configured", "warn", "Open to run `goose configure`."),
                 )
 
         # Copilot — GitHub token (github-copilot-sdk extra is soft).
@@ -11139,7 +11145,13 @@ def _run_configure_harnesses_interactive() -> None:
             )
         else:
             rows.append(
-                (COPILOT_KEY, "Copilot", "No token", "warn", "Open to add the GitHub token."),
+                (
+                    COPILOT_KEY,
+                    "Copilot",
+                    "Not configured",
+                    "warn",
+                    "Open to add the GitHub token.",
+                ),
             )
 
         # Kiro — native CLI, own auth via `kiro-cli login`.
