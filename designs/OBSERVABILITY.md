@@ -178,7 +178,7 @@ Server, Policy Server, Server database.** Choke points below are from the codeba
 - **SSE chat stream** (`GET /v1/sessions/{id}/stream`): the HTTP handshake is traced by
   FastAPI. Each streamed event is annotated with the active `trace_id` in
   `_format_sse` (`sessions.py:1754`) so the client can correlate UI blocks to the trace.
-- **Browser-origin propagation (implemented):** `ap-web/src/lib/telemetry.ts`
+- **Browser-origin propagation (implemented):** `web/src/lib/telemetry.ts`
   (`initBrowserTelemetry`, called first in `main.tsx`) initializes the OpenTelemetry
   **web SDK** and registers `@opentelemetry/instrumentation-fetch` and
   `-xml-http-request` so every `fetch`/SSE call carries a browser-rooted `traceparent`.
@@ -384,7 +384,7 @@ all-in-one produced the expected connected traces:
   `traceparent` propagation (§6.4) with a real daemon.
 - **Per-component `service.name`** distinguishes all four processes in the backend.
 
-Browser propagation (§6.1) is validated by `ap-web/src/lib/telemetry.test.ts` and the
+Browser propagation (§6.1) is validated by `web/src/lib/telemetry.test.ts` and the
 production build; the server-side extraction it depends on is exercised by the live turn
 above.
 
