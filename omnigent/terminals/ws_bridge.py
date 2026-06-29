@@ -71,6 +71,7 @@ _WS_COALESCE_MAX_BYTES: Final[int] = 64 * 1024
 # input.
 _INTERACTIVE_WS_COALESCE_MAX_BYTES: Final[int] = 2048
 _INTERACTIVE_ECHO_WINDOW_S: Final[float] = 0.75
+_PANE_LIVENESS_CHECK_CACHE_S: Final[float] = 0.1  # 100ms cache to avoid per-keystroke probe
 
 _TMUX_ATTACH_WAIT_GRACE_S: Final[float] = 0.5
 _TMUX_ATTACH_WAIT_POLL_S: Final[float] = 0.02
@@ -313,6 +314,56 @@ async def _tmux_session_alive(socket_path: str, tmux_target: str) -> bool:
     return proc.returncode == 0 and bool(panes) and "1" not in panes
 
 
+async def _check_pane_dead_definitive(socket_path: str, tmux_target: str) -> bool | None:
+    """
+    Check if a pane is definitely dead or if the probe is inconclusive.
+
+    This is a variant of :func:`_tmux_session_alive` that distinguishes between
+    a confirmed dead pane and a transient probe error, so the caller can avoid
+    closing a live session due to a temporary tmux hiccup.
+
+    :param socket_path: Filesystem path to the tmux server socket.
+    :param tmux_target: The ``-t`` target identifying the session.
+    :returns: ``True`` only when we're certain the pane is dead
+        (rc == 0 and "1" in panes); ``False`` when certain the pane is alive
+        (rc == 0 and "1" not in panes); ``None`` when the probe is inconclusive
+        (any spawn/timeout/rc!=0 error).
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux",
+            "-S",
+            socket_path,
+            "list-panes",
+            "-t",
+            tmux_target,
+            "-F",
+            "#{pane_dead}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except (OSError, ValueError):
+        _logger.debug("tmux-attach: pane-dead probe spawn failed", exc_info=True)
+        return None
+    try:
+        stdout, _ = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=_TMUX_HAS_SESSION_TIMEOUT_S,
+        )
+    except (asyncio.TimeoutError, OSError):
+        _logger.debug("tmux-attach: pane-dead probe timed out", exc_info=True)
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        return None
+    # Inconclusive: session is gone (rc != 0).
+    if proc.returncode != 0:
+        _logger.debug("tmux-attach: pane-dead probe got non-zero rc=%s", proc.returncode)
+        return None
+    panes = stdout.decode().split()
+    # Conclusive: either all panes alive (no "1") or at least one dead ("1" in panes).
+    return "1" in panes
+
+
 async def _write_all_nonblocking(
     loop: asyncio.AbstractEventLoop,
     fd: int,
@@ -541,6 +592,7 @@ async def bridge_tmux_pty_to_websocket(
     loop = asyncio.get_running_loop()
     pty_chunks: asyncio.Queue[bytes | None] = asyncio.Queue()
     last_client_input_at: float | None = None
+    last_pane_check_at: float | None = None
 
     def _current_ws_coalesce_limit() -> int:
         """
@@ -599,22 +651,31 @@ async def bridge_tmux_pty_to_websocket(
                         with contextlib.suppress(OSError):
                             fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
                 elif data is not None and not read_only:
-                    # Check if the pane is still alive before writing. When remain-on-exit
-                    # keeps a dead pane alive, Ctrl-C and other input silently fail because
-                    # there's no process to receive the signal. Close the WebSocket immediately
-                    # to tell the client the session has ended rather than silently dropping
-                    # the keystroke.
-                    if not await _tmux_session_alive(socket_path, tmux_target):
-                        _logger.debug(
-                            "tmux-attach: pane is dead; closing websocket target=%s",
-                            tmux_target,
-                        )
-                        with contextlib.suppress(RuntimeError):
-                            await websocket.close(
-                                code=WS_CLOSE_TERMINAL_NOT_FOUND,
-                                reason="terminal session ended",
+                    # Probe pane liveness only if we haven't checked recently (cache
+                    # for ~100ms to avoid a subprocess per keystroke). When remain-on-exit
+                    # keeps a dead pane alive, Ctrl-C silently fails; detect and close
+                    # immediately. Only close if we're certain the pane is dead, not on
+                    # transient probe errors (timeouts, spawning hiccups).
+                    pane_check_due = (
+                        last_pane_check_at is None
+                        or _monotonic() - last_pane_check_at > _PANE_LIVENESS_CHECK_CACHE_S
+                    )
+                    if pane_check_due:
+                        nonlocal last_pane_check_at
+                        last_pane_check_at = _monotonic()
+                        is_dead = await _check_pane_dead_definitive(socket_path, tmux_target)
+                        if is_dead is True:
+                            _logger.debug(
+                                "tmux-attach: pane is dead; closing websocket target=%s",
+                                tmux_target,
                             )
-                        return
+                            with contextlib.suppress(RuntimeError):
+                                await websocket.close(
+                                    code=WS_CLOSE_TERMINAL_NOT_FOUND,
+                                    reason="terminal session ended",
+                                )
+                            return
+                        # is_dead is False (live) or None (inconclusive) → continue
                     last_client_input_at = _monotonic()
                     await _write_all_nonblocking(loop, master_fd, data)
         except WebSocketDisconnect:
