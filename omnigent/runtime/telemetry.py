@@ -473,6 +473,36 @@ def consume_frame_span(
         yield span
 
 
+@contextmanager
+def span(
+    name: str,
+    *,
+    attributes: Mapping[str, Any] | None = None,
+) -> Iterator[Any]:
+    """
+    Open a plain child span under the currently active trace context.
+
+    A thin wrapper over the OpenTelemetry tracer for instrumenting
+    infrastructure boundaries that are not JSON-frame transports — e.g.
+    a terminal-attach session or an in-process policy evaluation. The
+    parent is whatever context is active (a FastAPI-extracted request
+    span, an agent-turn span, etc.), so the new span nests correctly
+    without any explicit carrier.
+
+    :param name: Span name, e.g. ``"terminal.attach"`` or
+        ``"policy.evaluate"``.
+    :param attributes: Optional span attributes to set at start.
+    :returns: A context manager yielding the started span.
+    """
+    from opentelemetry import trace as otel_trace
+
+    tracer = otel_trace.get_tracer("omnigent")
+    with tracer.start_as_current_span(name) as started:
+        for key, value in (attributes or {}).items():
+            started.set_attribute(key, value)
+        yield started
+
+
 def _metrics_exporter_name() -> str:
     """
     Return the configured OpenTelemetry metrics exporter name.

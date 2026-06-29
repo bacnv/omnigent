@@ -664,6 +664,44 @@ def test_consume_frame_span_roots_new_trace_without_carrier(
         assert span.get_span_context().trace_id != 0
 
 
+def test_span_helper_emits_named_span_with_attributes(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """
+    ``telemetry.span`` emits a named child span with the given
+    attributes — the helper used to instrument plain infra boundaries
+    (terminal attach, policy evaluation).
+    """
+    with telemetry.span(
+        "terminal.attach",
+        attributes={"session.id": "s1", "terminal.read_only": True},
+    ):
+        pass
+
+    spans = in_memory_exporter.get_finished_spans()
+    assert len(spans) == 1
+    assert spans[0].name == "terminal.attach"
+    assert spans[0].attributes["session.id"] == "s1"
+    assert spans[0].attributes["terminal.read_only"] is True
+
+
+def test_span_helper_nests_under_active_trace(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """
+    A span opened with ``telemetry.span`` nests under the currently
+    active trace context, so infra spans join the request/turn trace
+    rather than rooting their own.
+    """
+    with telemetry.trace_context_for_response(response_id=_RESP_ID):
+        with telemetry.span("policy.evaluate"):
+            pass
+
+    spans = in_memory_exporter.get_finished_spans()
+    assert len(spans) == 1
+    assert format(spans[0].context.trace_id, "032x") == _RESP_HEX
+
+
 def test_httpx_to_fastapi_propagates_trace_across_http_hop(
     in_memory_exporter: InMemorySpanExporter,
     monkeypatch: pytest.MonkeyPatch,
