@@ -570,6 +570,26 @@ def test_tracing_context_stamps_session_id_on_agent_span(
     assert agent_spans[-1].attributes.get("session.id") == "conv_abc123"
 
 
+def test_set_session_id_stamps_current_span(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """
+    ``set_session_id`` tags the active span — used by session-creating
+    routes (``POST /v1/sessions``) where the conv id is minted in the body
+    and so is absent from the request path the FastAPI hook reads. A falsy
+    id is a no-op.
+
+    :param in_memory_exporter: In-memory span exporter fixture.
+    """
+    tracer = otel_trace.get_tracer("test")
+    with tracer.start_as_current_span("POST /v1/sessions"):
+        telemetry.set_session_id("conv_cafef00d")
+        telemetry.set_session_id(None)  # no-op, must not raise or clear
+
+    exported = in_memory_exporter.get_finished_spans()
+    assert exported[-1].attributes.get("session.id") == "conv_cafef00d"
+
+
 def test_init_sets_service_name_from_argument(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

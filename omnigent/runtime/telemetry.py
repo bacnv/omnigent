@@ -194,6 +194,34 @@ def record_message_payload(
     target.set_attribute(key, _payload_to_attribute(payload))
 
 
+def set_session_id(session_id: str | None) -> None:
+    """
+    Stamp ``session.id`` on the currently active span.
+
+    For session-scoped work where the conversation id is NOT in the
+    request path — notably ``POST /v1/sessions`` (create), where the id
+    is minted server-side and returned in the body, so the path-based
+    :func:`_fastapi_session_id_hook` cannot tag it. Call this once the id
+    is known so the span joins the session's ``session.id`` group.
+
+    Best-effort and gated by the master opt-in: a no-op when telemetry is
+    off, the id is falsy, or no span is recording.
+
+    :param session_id: The Omnigent session (conversation) id, e.g.
+        ``"conv_…"``.
+    """
+    if not session_id or not telemetry_enabled():
+        return
+    try:
+        from opentelemetry import trace as otel_trace
+
+        span = otel_trace.get_current_span()
+        if span is not None and span.is_recording():
+            span.set_attribute("session.id", session_id)
+    except Exception:  # pragma: no cover - telemetry must never break requests
+        pass
+
+
 def _fastapi_instrumentation_enabled() -> bool:
     """
     Decide whether to install FastAPI server instrumentation.
