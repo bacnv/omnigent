@@ -25,6 +25,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -38,7 +39,7 @@ from tests._helpers.compat import (
     server_executable,
 )
 from tests.e2e.helpers import lookup_databricks_host
-from tests.harness_bench.driver import TurnResult
+from tests.harness_bench.driver import PHASE_TOOL_CALL, TurnResult
 from tests.harness_bench.profile import BenchProfile
 
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
@@ -276,23 +277,49 @@ class FullServerDriver:
 
     # ── turn ─────────────────────────────────────────────────
 
-    def run_turn(self, prompt: str, *, timeout: float = 180.0, **_ignored: object) -> TurnResult:
-        """Drive one basic turn and return a :class:`TurnResult`.
+    def run_turn(
+        self,
+        prompt: str,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        deny_phases: frozenset[str] = frozenset(),
+        policy_reason: str | None = None,
+        auto_tool_output: str | None = None,
+        interrupt_on_first_delta: bool = False,
+        timeout: float = 180.0,
+    ) -> TurnResult:
+        """Drive one turn through the full server and return a :class:`TurnResult`.
 
-        Skeleton scope: sends the user message and polls the session to a
-        terminal state, filling ``text`` / ``completed`` / ``failed``.
-        Streaming deltas, tools, policy, and interrupt are layered on next
-        (the ``**_ignored`` kwargs keep the probe call sites compatible
-        until then).
+        Unlike the wrap driver, policy is enforced by the *server*: when
+        *deny_phases* names the tool-call phase, a fixed-action deny policy
+        scoped to ``tool_call`` is attached to the session before the turn,
+        so the server blocks the call the way production does.
+
+        Tools are passed on the message; tool calls and their outputs are
+        read from the session snapshot. Delta-level streaming is not
+        measured here (that needs the SSE subscribe stream) — this driver
+        targets the dimensions the wrap path cannot prove: real
+        server-enforced policy and server-dispatched tools.
+
+        :param interrupt_on_first_delta: Approximated on the full-server
+            path — the interrupt is posted once the session is running,
+            since snapshot polling has no per-delta signal.
         """
         assert self._client is not None and self._session_id is not None
         result = TurnResult()
-        body = {
+
+        if PHASE_TOOL_CALL in deny_phases:
+            self._attach_deny_policy(["tool_call"], policy_reason)
+
+        body: dict[str, Any] = {
             "type": "message",
             "data": {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
         }
+        if tools is not None:
+            body["tools"] = tools
         posted = self._client.post(f"/v1/sessions/{self._session_id}/events", json=body)
         if posted.status_code == 202 and posted.json().get("denied"):
+            # A synchronous (request-phase) DENY short-circuited the turn.
             result.failed = True
             result.error = {"denied": True, "reason": posted.json().get("reason")}
             return result
@@ -300,25 +327,105 @@ class FullServerDriver:
 
         deadline = time.monotonic() + timeout
         seen_running = False
+        interrupted = False
+        answered: set[str] = set()
         while time.monotonic() < deadline:
             snap = self._client.get(f"/v1/sessions/{self._session_id}")
             snap.raise_for_status()
             body = snap.json()
             status = body.get("status")
+            items = body.get("items", [])
+            self._scan_items(items, result, policy_reason, auto_tool_output, answered)
+
             if status in ("running", "waiting"):
                 seen_running = True
+                if interrupt_on_first_delta and not interrupted:
+                    interrupted = True
+                    self._client.post(
+                        f"/v1/sessions/{self._session_id}/events", json={"type": "interrupt"}
+                    )
             if status == "failed":
                 result.failed = True
                 result.error = body.get("last_task_error") or body.get("error")
                 break
             if status == "idle" and seen_running:
-                result.completed = True
-                result.text = _assistant_text(body.get("items", []))
+                if interrupted:
+                    result.cancelled = True
+                else:
+                    result.completed = True
+                result.text = _assistant_text(items)
                 break
             time.sleep(_POLL_INTERVAL_S)
         else:
             result.timed_out = True
         return result
+
+    def _attach_deny_policy(self, on_phases: list[str], reason: str | None) -> None:
+        """Attach a fixed-action deny policy scoped to *on_phases* to the session."""
+        assert self._client is not None
+        self._client.post(
+            f"/v1/sessions/{self._session_id}/policies",
+            json={
+                "name": "bench_deny",
+                "type": "function",
+                "function": {
+                    "path": "omnigent.policies.function.make_fixed_action_callable",
+                    "arguments": {
+                        "action": "deny",
+                        "reason": reason or "bench-policy-deny",
+                        "on_phases": on_phases,
+                    },
+                },
+            },
+        )
+
+    def _scan_items(
+        self,
+        items: list[dict],
+        result: TurnResult,
+        policy_reason: str | None,
+        auto_tool_output: str | None,
+        answered: set[str],
+    ) -> None:
+        """Update *result* from session items: tool calls, blocks, tool outputs."""
+        assert self._client is not None
+        seen_calls = {tc.get("call_id") for tc in result.tool_calls}
+        for raw in items:
+            data = raw.get("data", raw)
+            itype = raw.get("type") or data.get("type")
+            if itype == "function_call":
+                call_id = data.get("call_id") or raw.get("call_id")
+                if call_id and call_id not in seen_calls:
+                    result.tool_calls.append(
+                        {
+                            "call_id": call_id,
+                            "name": data.get("name"),
+                            "arguments": data.get("arguments"),
+                        }
+                    )
+                    seen_calls.add(call_id)
+                # Answer an outstanding call if the probe supplied an output
+                # and the server is waiting on the client (ALLOW path).
+                if (
+                    auto_tool_output is not None
+                    and raw.get("status") == "action_required"
+                    and call_id
+                    and call_id not in answered
+                ):
+                    answered.add(call_id)
+                    self._client.post(
+                        f"/v1/sessions/{self._session_id}/events",
+                        json={
+                            "type": "tool_result",
+                            "call_id": call_id,
+                            "output": auto_tool_output,
+                        },
+                    )
+            elif itype == "function_call_output":
+                out = str(data.get("output", ""))
+                reason = policy_reason or "bench-policy-deny"
+                if data.get("status") == "blocked" or reason in out:
+                    result.tool_call_denied = True
 
 
 def _assistant_text(items: list[dict]) -> str:
