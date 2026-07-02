@@ -81,9 +81,9 @@ async function run({
   };
   const warnings = [];
   const core = { info: () => {}, warning: (m) => warnings.push(m) };
-  if (unavailable.length) {
-    fs.writeFileSync(UNAVAILABLE_PATH, unavailable.join("\n") + "\n");
-  }
+  // Always write the availability file so tests are isolated from whatever the
+  // committed .github/UNAVAILABLE happens to list; default is "nobody out".
+  fs.writeFileSync(UNAVAILABLE_PATH, unavailable.join("\n") + "\n");
   try {
     await script({ github, context, core });
   } finally {
