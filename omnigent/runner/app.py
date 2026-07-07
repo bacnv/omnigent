@@ -9,6 +9,7 @@ GET /v1/agents/{id}/contents for out-of-process use).
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import dataclasses
 import json
@@ -106,10 +107,32 @@ _logger = logging.getLogger(__name__)
 # (``_version_supports_waiting_status``). An unknown version — unprobed or a
 # probe failure — downgrades too, so an old server is never 500'd.
 _WAITING_STATUS_MIN_SERVER_VERSION = "0.3.0"
+_PERMISSION_HOOK_REFRESH_FALLBACK_S = 1200.0
+_PERMISSION_HOOK_REFRESH_MIN_S = 60.0
+_PERMISSION_HOOK_REFRESH_SKEW_S = 300.0
 # Cached server version from the /api/version probe; ``None`` until a probe
 # succeeds. A failed probe stays ``None`` and is retried on the next
 # session-create — the GET is cheap and self-heals a transient failure.
 _server_version: str | None = None
+
+
+def _permission_hook_refresh_delay_s(token: str | None, *, now: float | None = None) -> float:
+    """Return seconds until the hook token should be refreshed."""
+    if not token:
+        return _PERMISSION_HOOK_REFRESH_FALLBACK_S
+    try:
+        payload = token.split(".", 2)[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+        exp = claims.get("exp")
+    except (IndexError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return _PERMISSION_HOOK_REFRESH_FALLBACK_S
+    if not isinstance(exp, (int, float)):
+        return _PERMISSION_HOOK_REFRESH_FALLBACK_S
+    return max(
+        _PERMISSION_HOOK_REFRESH_MIN_S,
+        float(exp) - (time.time() if now is None else now) - _PERMISSION_HOOK_REFRESH_SKEW_S,
+    )
 
 
 def _version_supports_waiting_status(server_version: str) -> bool:
@@ -5885,20 +5908,15 @@ async def _auto_create_claude_terminal(
     # ``claude_native.py``.
     from omnigent.claude_native_forwarder import supervise_forwarder
 
-    # The permission-hook bearer baked into permission_hook.json at launch
-    # (above, via augment_claude_args) is hard-capped at 1800s
-    # (_MANAGED_RUNNER_TOKEN_TTL_S) and the hook subprocess that replays it
-    # has no way to mint a replacement. Re-mint and rewrite the file well
-    # before that TTL elapses, for as long as this session's forwarder runs,
-    # so a long-lived host-spawned session doesn't permanently fail-closed
-    # its policy hooks after ~30 minutes.
-    _PERMISSION_HOOK_REFRESH_INTERVAL_S = 1200.0
-
+    # The hook subprocess replays a static bearer from permission_hook.json.
+    # Refresh just before that bearer expires; fall back to a conservative cadence
+    # for opaque/non-JWT credentials.
     async def _refresh_permission_hook_forever() -> None:
         from omnigent.claude_native_bridge import refresh_permission_hook_headers
 
+        refresh_delay_s = _permission_hook_refresh_delay_s(_auth_token)
         while True:
-            await asyncio.sleep(_PERMISSION_HOOK_REFRESH_INTERVAL_S)
+            await asyncio.sleep(refresh_delay_s)
             fresh_token = _auth_factory() if _auth_factory is not None else None
             fresh_headers = databricks_request_headers(server_url, bearer_token=fresh_token)
             await asyncio.to_thread(
@@ -5907,6 +5925,7 @@ async def _auto_create_claude_terminal(
                 ap_server_url=server_url,
                 ap_auth_headers=fresh_headers,
             )
+            refresh_delay_s = _permission_hook_refresh_delay_s(fresh_token)
 
     async def _run_forwarder_and_hook_refresh() -> None:
         await asyncio.gather(
