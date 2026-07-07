@@ -1052,6 +1052,40 @@ def read_permission_hook_config(bridge_dir: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def refresh_permission_hook_headers(
+    bridge_dir: Path,
+    *,
+    ap_server_url: str,
+    ap_auth_headers: dict[str, str],
+) -> None:
+    """
+    Overwrite ``permission_hook.json`` with a freshly minted bearer.
+
+    The claude-native ``evaluate-policy`` / ``permission-request`` command
+    hooks are stateless subprocesses that replay this file's static
+    headers on every call — they have no credential of their own to mint
+    a replacement when the baked bearer expires (see
+    ``_MANAGED_RUNNER_TOKEN_TTL_S`` in ``server/routes/runner_tunnel.py``,
+    currently 1800s). Call this periodically, from the long-lived runner
+    process that DOES hold a mintable credential, before that TTL elapses.
+
+    :param bridge_dir: Bridge directory path.
+    :param ap_server_url: Omnigent server base URL, e.g.
+        ``"http://127.0.0.1:8000"``.
+    :param ap_auth_headers: Freshly minted headers, e.g.
+        ``{"Authorization": "Bearer <token>"}``.
+    :returns: None.
+    """
+    _write_json_file(
+        bridge_dir / _PERMISSION_HOOK_FILE,
+        {
+            "ap_server_url": ap_server_url,
+            "ap_auth_headers": ap_auth_headers,
+            "updated_at": time.time(),
+        },
+    )
+
+
 def build_mcp_config(bridge_dir: Path, *, python_executable: str | None = None) -> dict[str, Any]:
     """
     Build the Claude Code MCP config for the Omnigent bridge server.

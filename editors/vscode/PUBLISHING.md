@@ -82,9 +82,9 @@ The one-time setup that makes this possible is tracked below.
 | 2   | Maintain `CHANGELOG.md` (strip Jira refs, keep GH issue refs)                                                                                                                                                                                                                                                                                  | `editors/vscode`                                                                                                                                                            | — (done)            |
 | 3   | Verify the build: `npm ci && npm run build && npm run package` → valid `.vsix`                                                                                                                                                                                                                                                                 | local / CI                                                                                                                                                                  | — (done)            |
 | 4   | Release-PR workflow bumps version + CHANGELOG; a manually-dispatched release workflow builds the `.vsix` and attaches it (+`.sha256`) to a draft GitHub release                                                                                                                                                                                | `.github/workflows/vscode-release-pr.yml`, `vscode-extension-release.yml`                                                                                                   | — (done)            |
-| 5   | Ask DECO to register `omnigent-vscode` under the `databricks` publisher + add dedicated `OMNI_VSCE_TOKEN` / `OMNI_OVSX_PAT` secrets (and an `omnigent-vscode-marketplace` environment for the reviewer gate)                                                                                                                                    | Slack `#dev-ecosystem-discuss` ([https://databricks.slack.com/archives/C01KSAWFXG8/p1782971196701749](https://databricks.slack.com/archives/C01KSAWFXG8/p1782971196701749)) | human approval      |
+| 5   | Ask DECO to register `omnigent-vscode` under the `databricks` publisher + issue a Marketplace PAT                                                                                                                                                                                                                                              | Slack `#dev-ecosystem-discuss` ([https://databricks.slack.com/archives/C01KSAWFXG8/p1782971196701749](https://databricks.slack.com/archives/C01KSAWFXG8/p1782971196701749)) | human approval      |
 | 6   | Add an `omnigent-vscode.yml` publish workflow in the secure repo, adapting the existing [`databricks-vscode.yml`](https://github.com/databricks/secure-public-registry-releases-eng/blob/main/.github/workflows/databricks-vscode.yml) (SAML SSO required) — it already does download → scan → `vsce publish` + `ovsx publish` in one workflow | `secure-public-registry-releases-eng`                                                                                                                                       | DECO grant (step 5) |
-| 7   | Populate the dedicated `OMNI_VSCE_TOKEN` + `OMNI_OVSX_PAT` secrets; register rows in `go/npp-release-status`; get sign-off in `#unblock-releases-public`                                                                                                                                                                                       | secure repo + Slack                                                                                                                                                         | steps 5–6           |
+| 7   | Confirm `VSCE_TOKEN` + `OVSX_PAT` cover the omnigent publisher (the `databricks-vscode-marketplace` environment already holds them); register rows in `go/npp-release-status`; get sign-off in `#unblock-releases-public`                                                                                                                      | secure repo + Slack                                                                                                                                                         | steps 5–6           |
 
 
 Steps 1–4 are complete in this repo. Steps 5–7 need the DECO grant and the
@@ -108,12 +108,7 @@ both.
 accepted pattern — `omnigent.yml` checks out `omnigent-ai/omnigent` for the
 PyPI release. So reading a public omnigent release from the hardened runner is
 not a new blocker.
-- Marketplace publish reads **dedicated `OMNI_VSCE_TOKEN` / `OMNI_OVSX_PAT`
-secrets**, separate from databricks-vscode's `VSCE_TOKEN` / `OVSX_PAT`. Same
-`databricks` publisher, but distinct tokens so the two teams' release schedules
-and the mandatory revoke-after-release step never conflict. (Note: a GitHub
-`environment:` alone would NOT isolate repo-level secrets — the distinct secret
-names are what isolate the tokens. The jobs also bind an
-`omnigent-vscode-marketplace` environment for an independent reviewer gate.)
-DECO must add these secrets (step 5) before the first publish.
+- Marketplace publish binds the `databricks-vscode-marketplace` environment and
+reads `VSCE_TOKEN` / `OVSX_PAT`. A new omnigent flow either reuses that
+environment or gets its own (confirm with DECO which, per step 7).
 

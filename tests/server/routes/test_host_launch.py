@@ -49,6 +49,14 @@ class _FakeConversationStore:
         return self.convs.get(conversation_id)
 
 
+@dataclass
+class _FakePermissionStore:
+    admins: set[str] = field(default_factory=set)
+
+    def is_admin(self, user_id: str) -> bool:
+        return user_id in self.admins
+
+
 # ── resolve_host_owner ───────────────────────────────────────────────
 
 
@@ -77,6 +85,31 @@ class TestResolveHostOwner:
         store = _FakeHostStore(hosts={"host_1": host})
         result = resolve_host_owner(user_id=None, host_id="host_1", host_store=store)
         assert result.host_id == "host_1"
+
+    def test_admin_owned_host_allowed_for_other_user(self) -> None:
+        host = _FakeHost(host_id="host_1", owner="admin@example.com")
+        store = _FakeHostStore(hosts={"host_1": host})
+        perms = _FakePermissionStore(admins={"admin@example.com"})
+        result = resolve_host_owner(
+            user_id="alice",
+            host_id="host_1",
+            host_store=store,
+            permission_store=perms,
+        )
+        assert result.host_id == "host_1"
+
+    def test_non_admin_owned_host_still_403_with_permission_store(self) -> None:
+        host = _FakeHost(host_id="host_1", owner="bob")
+        store = _FakeHostStore(hosts={"host_1": host})
+        perms = _FakePermissionStore(admins={"admin@example.com"})
+        with pytest.raises(HTTPException) as exc_info:
+            resolve_host_owner(
+                user_id="alice",
+                host_id="host_1",
+                host_store=store,
+                permission_store=perms,
+            )
+        assert exc_info.value.status_code == 403
 
 
 # ── resolve_host_launch ──────────────────────────────────────────────

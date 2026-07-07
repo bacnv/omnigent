@@ -5885,16 +5885,45 @@ async def _auto_create_claude_terminal(
     # ``claude_native.py``.
     from omnigent.claude_native_forwarder import supervise_forwarder
 
+    # The permission-hook bearer baked into permission_hook.json at launch
+    # (above, via augment_claude_args) is hard-capped at 1800s
+    # (_MANAGED_RUNNER_TOKEN_TTL_S) and the hook subprocess that replays it
+    # has no way to mint a replacement. Re-mint and rewrite the file well
+    # before that TTL elapses, for as long as this session's forwarder runs,
+    # so a long-lived host-spawned session doesn't permanently fail-closed
+    # its policy hooks after ~30 minutes.
+    _PERMISSION_HOOK_REFRESH_INTERVAL_S = 1200.0
+
+    async def _refresh_permission_hook_forever() -> None:
+        from omnigent.claude_native_bridge import refresh_permission_hook_headers
+
+        while True:
+            await asyncio.sleep(_PERMISSION_HOOK_REFRESH_INTERVAL_S)
+            fresh_token = _auth_factory() if _auth_factory is not None else None
+            fresh_headers = databricks_request_headers(server_url, bearer_token=fresh_token)
+            await asyncio.to_thread(
+                refresh_permission_hook_headers,
+                bridge_dir,
+                ap_server_url=server_url,
+                ap_auth_headers=fresh_headers,
+            )
+
+    async def _run_forwarder_and_hook_refresh() -> None:
+        await asyncio.gather(
+            supervise_forwarder(
+                base_url=server_url,
+                headers=_runner_headers,
+                session_id=session_id,
+                bridge_dir=bridge_dir,
+                agent_name="claude-native-ui",
+                start_at_end=resume_external_session_id is not None,
+                auth=_runner_auth,
+            ),
+            _refresh_permission_hook_forever(),
+        )
+
     _forwarder_task = asyncio.create_task(
-        supervise_forwarder(
-            base_url=server_url,
-            headers=_runner_headers,
-            session_id=session_id,
-            bridge_dir=bridge_dir,
-            agent_name="claude-native-ui",
-            start_at_end=resume_external_session_id is not None,
-            auth=_runner_auth,
-        ),
+        _run_forwarder_and_hook_refresh(),
         name=f"claude-forwarder-{session_id}",
     )
     _register_auto_forwarder_task(session_id, _forwarder_task)

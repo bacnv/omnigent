@@ -534,6 +534,78 @@ async def test_list_filesystem_owner_check_blocks_other_users(
     assert resp.status_code == 403
 
 
+async def test_list_filesystem_admin_owned_host_allowed_for_other_user(
+    fs_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    db_uri: str,
+) -> None:
+    """
+    A regular user CAN browse an admin-owned host's filesystem.
+
+    Companion to ``test_list_filesystem_owner_check_blocks_other_users``:
+    that test pins the non-admin case still 403ing; this one pins the
+    new admin-owner bypass. Alice owns the host and is an admin, bob
+    is a regular user browsing it.
+
+    ``db_uri`` is requested directly (rather than reaching into
+    ``fs_app``'s ``host_store``) to build a second store handle on the
+    same on-disk SQLite file — the same pattern ``perm_store`` /
+    ``conv_store`` fixtures use elsewhere (see
+    ``tests/server/routes/test_auth_helpers.py``).
+    """
+    from omnigent.server.auth import AuthProvider
+    from omnigent.stores.permission_store.sqlalchemy_store import (
+        SqlAlchemyPermissionStore,
+    )
+
+    _app, _reg, host_store, conv_store = fs_app
+
+    class _Stub(AuthProvider):
+        def get_user_id(self, request: Any) -> str | None:
+            return request.headers.get("X-Test-User")
+
+    auth = _Stub()
+    permission_store = SqlAlchemyPermissionStore(db_uri)
+    permission_store.ensure_user("alice@example.com")
+    permission_store.set_admin("alice@example.com", True)
+
+    auth_app = FastAPI()
+    registry = HostRegistry()
+    auth_app.include_router(
+        create_host_tunnel_router(registry, host_store, auth_provider=auth),
+        prefix="/v1",
+    )
+    auth_app.include_router(
+        create_hosts_router(
+            registry,
+            host_store,
+            conv_store,
+            auth_provider=auth,
+            permission_store=permission_store,
+        ),
+        prefix="/v1",
+    )
+
+    host_store.upsert_on_connect(
+        host_id="host_alice_admin",
+        name="alice-laptop",
+        owner="alice@example.com",
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=auth_app), base_url="http://test"
+    ) as client:
+        resp = await client.get(
+            "/v1/hosts/host_alice_admin/filesystem",
+            headers={"X-Test-User": "bob@example.com"},
+        )
+    # 409 (host offline) is acceptable here — no mock host is connected
+    # in this test, only the ownership gate is under test. 403 would mean
+    # the bypass didn't fire.
+    assert resp.status_code != 403, (
+        f"Expected the admin-owner bypass to pass ownership, got 403: {resp.text}"
+    )
+
+
 # ── Pagination ──────────────────────────────────────────
 
 

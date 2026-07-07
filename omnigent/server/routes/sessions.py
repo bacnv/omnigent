@@ -6062,6 +6062,7 @@ async def _validate_session_workspace(
     agent: Any,
     agent_cache: AgentCache | None,
     request: Request,
+    permission_store: PermissionStore | None = None,
 ) -> str:
     """
     Validate a session's workspace against the agent's os_env boundary.
@@ -6090,6 +6091,9 @@ async def _validate_session_workspace(
         spec; ``None`` is treated as a server config error.
     :param request: FastAPI request; ``request.app.state``
         carries the host registry and host store.
+    :param permission_store: Used by :func:`resolve_host_owner` to allow
+        access when the target host's owner is an admin. ``None``
+        disables the admin bypass.
     :returns: The canonicalized workspace path that should be
         stored on the session row, e.g.
         ``"/Users/corey/universe/src/foo"`` (realpath; symlinks
@@ -6146,6 +6150,7 @@ async def _validate_session_workspace(
             user_id=user_id,
             host_id=host_id,
             host_store=host_store_inst,
+            permission_store=permission_store,
         )
         host_name = host.name
 
@@ -12337,6 +12342,7 @@ async def _create_session_from_existing_agent(
             agent=agent,
             agent_cache=agent_cache,
             request=request,
+            permission_store=permission_store,
         )
 
     # Git worktree options (optional). Two modes on body.git:

@@ -548,6 +548,51 @@ def test_list_hosts_empty_for_unknown_owner(
     assert result == []
 
 
+def test_list_hosts_for_owners_unions_multiple_owners(
+    host_store: HostStore,
+) -> None:
+    """
+    Verify list_hosts_for_owners returns hosts across all given owners.
+
+    If it only returns one owner's hosts, the IN-clause is broken or
+    missing.
+    """
+    host_store.upsert_on_connect("host_u1", "alice-laptop", "alice@example.com")
+    host_store.upsert_on_connect("host_u2", "bob-laptop", "bob@example.com")
+    host_store.upsert_on_connect("host_u3", "carol-laptop", "carol@example.com")
+
+    result = host_store.list_hosts_for_owners(["alice@example.com", "bob@example.com"])
+
+    host_ids = {h.host_id for h in result}
+    assert host_ids == {"host_u1", "host_u2"}
+
+
+def test_list_hosts_for_owners_dedupes_when_same_owner_repeated(
+    host_store: HostStore,
+) -> None:
+    """
+    Verify passing the same owner twice doesn't duplicate its hosts.
+
+    Covers the caller-is-also-admin case in the /v1/hosts route, where
+    the owners set may still contain a duplicate before de-duplication.
+    """
+    host_store.upsert_on_connect("host_u4", "alice-laptop", "alice@example.com")
+
+    result = host_store.list_hosts_for_owners(["alice@example.com", "alice@example.com"])
+
+    assert [h.host_id for h in result] == ["host_u4"]
+
+
+def test_list_hosts_for_owners_empty_input_returns_empty(
+    host_store: HostStore,
+) -> None:
+    """
+    Verify an empty owners list returns an empty result without
+    touching the database.
+    """
+    assert host_store.list_hosts_for_owners([]) == []
+
+
 def test_get_host_returns_none_for_unknown(
     host_store: HostStore,
 ) -> None:

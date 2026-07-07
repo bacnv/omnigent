@@ -39,6 +39,7 @@ from omnigent.claude_native_bridge import (
     read_launch_model,
     read_message_deltas_from_offset,
     read_permission_hook_config,
+    refresh_permission_hook_headers,
     read_transcript_items_from_offset,
     read_transcript_items_since,
     read_transcript_path,
@@ -267,6 +268,56 @@ def test_prepare_bridge_dir_preserves_permission_hook_config(
     config = read_permission_hook_config(bridge_dir)
     assert config["ap_server_url"] == "http://127.0.0.1:8787"
     assert config["ap_auth_headers"] == {"Authorization": "Bearer xyz"}
+
+
+def test_refresh_permission_hook_headers_overwrites_existing_file(tmp_path: Path) -> None:
+    """
+    A periodic refresh replaces the bearer without touching the server URL.
+
+    The managed-runner bearer baked into ``permission_hook.json`` at launch
+    is hard-capped at 1800s (``_MANAGED_RUNNER_TOKEN_TTL_S`` in
+    ``server/routes/runner_tunnel.py``) and the hook subprocess that
+    replays it has no way to mint a replacement. This guards the rewrite
+    helper a long-lived runner calls periodically to keep that file fresh.
+    """
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    hook_path = bridge_dir / "permission_hook.json"
+    hook_path.write_text(
+        json.dumps(
+            {
+                "ap_server_url": "http://127.0.0.1:8000",
+                "ap_auth_headers": {"Authorization": "Bearer stale-token"},
+                "updated_at": 1000.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    refresh_permission_hook_headers(
+        bridge_dir,
+        ap_server_url="http://127.0.0.1:8000",
+        ap_auth_headers={"Authorization": "Bearer fresh-token"},
+    )
+
+    config = read_permission_hook_config(bridge_dir)
+    assert config["ap_auth_headers"] == {"Authorization": "Bearer fresh-token"}
+    assert config["ap_server_url"] == "http://127.0.0.1:8000"
+    assert config["updated_at"] > 1000.0
+
+
+def test_refresh_permission_hook_headers_creates_file_if_missing(tmp_path: Path) -> None:
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+
+    refresh_permission_hook_headers(
+        bridge_dir,
+        ap_server_url="http://127.0.0.1:8000",
+        ap_auth_headers={"Authorization": "Bearer fresh-token"},
+    )
+
+    config = read_permission_hook_config(bridge_dir)
+    assert config["ap_auth_headers"] == {"Authorization": "Bearer fresh-token"}
 
 
 def test_prepare_bridge_dir_restricts_filesystem_permissions(
