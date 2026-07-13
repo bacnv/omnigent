@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from omnigent.db.utils import get_or_create_engine
 from omnigent.entities import (
@@ -178,6 +178,63 @@ def test_list_latest_message_items_for_conversations(
     assert _texts(conv_b.id) == ["bravo new", "bravo middle"]
     assert result[conv_empty.id] == []
     assert result["conv_missing"] == []
+
+
+def test_list_latest_message_items_does_not_rank_full_histories(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    """The batched latest-message read must limit inside each conversation."""
+    conv_a = conversation_store.create_conversation(title="alpha")
+    conv_b = conversation_store.create_conversation(title="beta")
+    for conv in (conv_a, conv_b):
+        conversation_store.append(
+            conv.id,
+            [
+                NewConversationItem(
+                    type="message",
+                    response_id=f"resp_{conv.id}",
+                    data=MessageData(
+                        role="assistant",
+                        content=[{"type": "output_text", "text": str(i)}],
+                        agent="worker",
+                    ),
+                )
+                for i in range(20)
+            ],
+        )
+
+    statements: list[str] = []
+
+    def _capture_sql(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement.lower())
+
+    event.listen(conversation_store._engine, "before_cursor_execute", _capture_sql)
+    try:
+        result = conversation_store.list_latest_message_items_for_conversations(
+            [conv_a.id, conv_b.id], per_conversation_limit=2
+        )
+    finally:
+        event.remove(conversation_store._engine, "before_cursor_execute", _capture_sql)
+
+    def _message_texts(conversation_id: str) -> list[str]:
+        texts: list[str] = []
+        for item in result[conversation_id]:
+            assert isinstance(item.data, MessageData)
+            texts.append(item.data.content[0]["text"])
+        return texts
+
+    assert _message_texts(conv_a.id) == ["19", "18"]
+    assert _message_texts(conv_b.id) == ["19", "18"]
+    latest_sql = next(sql for sql in statements if "conversation_items" in sql)
+    assert "row_number() over" not in latest_sql
+    assert latest_sql.count(" limit ") >= 2
 
 
 def test_update_title(conversation_store: SqlAlchemyConversationStore) -> None:

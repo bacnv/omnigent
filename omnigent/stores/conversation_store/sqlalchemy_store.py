@@ -17,10 +17,10 @@ from sqlalchemy import (
     or_,
     select,
     text,
+    union_all,
     update,
 )
 from sqlalchemy.orm import QueryableAttribute, Session
-from sqlalchemy.sql.selectable import Subquery
 
 from omnigent._wrapper_labels import UI_MODE_LABEL_KEY, WRAPPER_LABEL_KEY
 from omnigent.db.converters import sql_agent_to_entity
@@ -521,34 +521,6 @@ def _to_item(row: SqlConversationItem) -> ConversationItem:
         created_at=row.created_at,
         data=parse_item_data(item_type, json.loads(row.data)),
         created_by=row.created_by,
-    )
-
-
-def _ranked_latest_message_item_ids(conversation_ids: list[str]) -> Subquery:
-    """
-    Build a ranked latest-message-id subquery for multiple conversations.
-
-    :param conversation_ids: Conversation ids to fetch messages for,
-        e.g. ``["conv_child1", "conv_child2"]``.
-    :returns: SQLAlchemy subquery with ``item_id`` and per-conversation
-        ``row_num`` columns, newest message first.
-    """
-    return (
-        select(
-            SqlConversationItem.id.label("item_id"),
-            func.row_number()
-            .over(
-                partition_by=SqlConversationItem.conversation_id,
-                order_by=desc(SqlConversationItem.position),
-            )
-            .label("row_num"),
-        )
-        .where(
-            SqlConversationItem.workspace_id == current_workspace_id(),
-            SqlConversationItem.conversation_id.in_(conversation_ids),
-            SqlConversationItem.type == encode_item_type("message"),
-        )
-        .subquery()
     )
 
 
@@ -1528,11 +1500,9 @@ class SqlAlchemyConversationStore(ConversationStore):
         """
         Return newest message items for multiple conversations.
 
-        Uses ``row_number() over (partition by conversation_id order by
-        position desc)`` so the database returns at most
-        ``per_conversation_limit`` message rows per conversation. This keeps
-        child-session summary rendering to one query instead of an N+1
-        ``list_items`` fan-out.
+        Uses one index-limited branch per conversation so the database reads
+        only ``per_conversation_limit`` rows from each history. Branches are
+        batched to avoid both an N+1 fan-out and SQLite's compound-select cap.
 
         :param conversation_ids: Conversation ids to fetch messages for,
             e.g. ``["conv_child1", "conv_child2"]``.
@@ -1547,25 +1517,50 @@ class SqlAlchemyConversationStore(ConversationStore):
             return result
 
         with self._session() as session:
-            ranked = _ranked_latest_message_item_ids(unique_ids)
-            rows = (
-                session.execute(
-                    select(SqlConversationItem)
-                    .join(ranked, SqlConversationItem.id == ranked.c.item_id)
-                    .where(
-                        SqlConversationItem.workspace_id == current_workspace_id(),
-                        ranked.c.row_num <= per_conversation_limit,
+            # Each branch stops at the requested limit via the position index;
+            # row_number() instead ranks the full history before limiting it.
+            for start in range(0, len(unique_ids), 200):
+                item_ids = union_all(
+                    *[
+                        select(branch.c.id, branch.c.conversation_id)
+                        for branch in (
+                            select(
+                                SqlConversationItem.id,
+                                SqlConversationItem.conversation_id,
+                            )
+                            .where(
+                                SqlConversationItem.workspace_id == current_workspace_id(),
+                                SqlConversationItem.conversation_id == conversation_id,
+                                SqlConversationItem.type == encode_item_type("message"),
+                            )
+                            .order_by(desc(SqlConversationItem.position))
+                            .limit(per_conversation_limit)
+                            .subquery()
+                            for conversation_id in unique_ids[start : start + 200]
+                        )
+                    ]
+                ).subquery()
+                rows = (
+                    session.execute(
+                        select(SqlConversationItem)
+                        .join(
+                            item_ids,
+                            and_(
+                                SqlConversationItem.conversation_id == item_ids.c.conversation_id,
+                                SqlConversationItem.id == item_ids.c.id,
+                            ),
+                        )
+                        .where(SqlConversationItem.workspace_id == current_workspace_id())
+                        .order_by(
+                            SqlConversationItem.conversation_id,
+                            desc(SqlConversationItem.position),
+                        )
                     )
-                    .order_by(
-                        SqlConversationItem.conversation_id,
-                        desc(SqlConversationItem.position),
-                    )
+                    .scalars()
+                    .all()
                 )
-                .scalars()
-                .all()
-            )
-            for row in rows:
-                result[row.conversation_id].append(_to_item(row))
+                for row in rows:
+                    result[row.conversation_id].append(_to_item(row))
         return result
 
     def append(
