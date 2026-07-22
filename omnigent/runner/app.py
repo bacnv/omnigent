@@ -9,6 +9,7 @@ GET /v1/agents/{id}/contents for out-of-process use).
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import dataclasses
 import json
@@ -124,10 +125,95 @@ def _is_first_user_turn(history: list[dict[str, Any]]) -> bool:
 # (``_version_supports_waiting_status``). An unknown version — unprobed or a
 # probe failure — downgrades too, so an old server is never 500'd.
 _WAITING_STATUS_MIN_SERVER_VERSION = "0.3.0"
+_PERMISSION_HOOK_REFRESH_FALLBACK_S = 1200.0
+_PERMISSION_HOOK_REFRESH_MIN_S = 60.0
+_PERMISSION_HOOK_REFRESH_SKEW_S = 300.0
 # Cached server version from the /api/version probe; ``None`` until a probe
 # succeeds. A failed probe stays ``None`` and is retried on the next
 # session-create — the GET is cheap and self-heals a transient failure.
 _server_version: str | None = None
+
+
+def _permission_hook_refresh_delay_s(token: str | None, *, now: float | None = None) -> float:
+    """Return seconds until the hook token should be refreshed."""
+    if not token:
+        return _PERMISSION_HOOK_REFRESH_FALLBACK_S
+    try:
+        payload = token.split(".", 2)[1]
+        payload += "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+    except (IndexError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return _PERMISSION_HOOK_REFRESH_FALLBACK_S
+    if not isinstance(claims, dict):
+        return _PERMISSION_HOOK_REFRESH_FALLBACK_S
+    exp = claims.get("exp")
+    if not isinstance(exp, (int, float)):
+        return _PERMISSION_HOOK_REFRESH_FALLBACK_S
+    return max(
+        _PERMISSION_HOOK_REFRESH_MIN_S,
+        float(exp) - (time.time() if now is None else now) - _PERMISSION_HOOK_REFRESH_SKEW_S,
+    )
+
+
+async def _run_forwarder_and_permission_hook_refresh(
+    forwarder: Awaitable[None],
+    refresh: Awaitable[None] | None = None,
+) -> None:
+    """
+    Run the transcript forwarder, optionally with permission-hook refresh.
+
+    Local / auth-disabled runners pass ``refresh=None`` so the forwarder is
+    not paired with a mint loop that would fail closed and cancel it.
+    When refresh is provided, ``asyncio.TaskGroup`` cancels and awaits the
+    sibling on either exit so a refresh error cannot orphan the forwarder
+    (and vice versa). The original error remains visible via ``ExceptionGroup``.
+    """
+    if refresh is None:
+        await forwarder
+        return
+    async with asyncio.TaskGroup() as tg:
+        tg.create_task(forwarder)
+        tg.create_task(refresh)
+
+
+async def _refresh_permission_hook_forever(
+    *,
+    bridge_dir: Path,
+    server_url: str,
+    auth_factory: Callable[[], str | None] | None,
+    initial_token: str | None,
+) -> None:
+    """
+    Re-mint the permission-hook bearer and rewrite ``permission_hook.json``.
+
+    The hook subprocess replays a static bearer from that file. Refresh just
+    before expiry; fall back to a conservative cadence for opaque/non-JWT
+    credentials. Tokens come only from ``auth_factory`` — never password or
+    auto-login flows. A configured factory that returns ``None`` fails closed
+    so a still-valid hook file is never overwritten with headerless auth.
+    """
+    from omnigent.claude_native_bridge import refresh_permission_hook_headers
+    from omnigent.cli_auth import databricks_request_headers
+
+    refresh_delay_s = _permission_hook_refresh_delay_s(initial_token)
+    while True:
+        await asyncio.sleep(refresh_delay_s)
+        if auth_factory is None:
+            raise RuntimeError("permission hook refresh failed: no auth factory configured")
+        # Mint may perform SDK/HTTP I/O — keep it off the event loop.
+        fresh_token = await asyncio.to_thread(auth_factory)
+        if not fresh_token:
+            raise RuntimeError("permission hook refresh failed: auth factory returned no token")
+        fresh_headers = databricks_request_headers(server_url, bearer_token=fresh_token)
+        if "Authorization" not in fresh_headers:
+            raise RuntimeError("permission hook refresh failed: headers missing Authorization")
+        await asyncio.to_thread(
+            refresh_permission_hook_headers,
+            bridge_dir,
+            ap_server_url=server_url,
+            ap_auth_headers=fresh_headers,
+        )
+        refresh_delay_s = _permission_hook_refresh_delay_s(fresh_token)
 
 
 def _version_supports_waiting_status(server_version: str) -> bool:
@@ -5979,16 +6065,34 @@ async def _auto_create_claude_terminal(
     # ``claude_native.py``.
     from omnigent.claude_native_forwarder import supervise_forwarder
 
-    _forwarder_task = asyncio.create_task(
-        supervise_forwarder(
-            base_url=server_url,
-            headers=_runner_headers,
-            session_id=session_id,
+    # The hook subprocess replays a static bearer from permission_hook.json.
+    # Refresh just before that bearer expires when the runner can mint tokens;
+    # auth-disabled / local sessions have no factory — skip refresh so the
+    # forwarder is not cancelled by a fail-closed mint after the fallback delay.
+    # TaskGroup cancels the sibling on either exit so a refresh error cannot
+    # orphan the forwarder. Lifecycle stays on the existing forwarder task
+    # registry for cancel-on-recreate/teardown.
+    _forwarder_coro = supervise_forwarder(
+        base_url=server_url,
+        headers=_runner_headers,
+        session_id=session_id,
+        bridge_dir=bridge_dir,
+        agent_name="claude-native-ui",
+        start_at_end=resume_external_session_id is not None,
+        auth=_runner_auth,
+    )
+    _refresh_coro = (
+        None
+        if _auth_factory is None
+        else _refresh_permission_hook_forever(
             bridge_dir=bridge_dir,
-            agent_name="claude-native-ui",
-            start_at_end=resume_external_session_id is not None,
-            auth=_runner_auth,
-        ),
+            server_url=server_url,
+            auth_factory=_auth_factory,
+            initial_token=_auth_token,
+        )
+    )
+    _forwarder_task = asyncio.create_task(
+        _run_forwarder_and_permission_hook_refresh(_forwarder_coro, _refresh_coro),
         name=f"claude-forwarder-{session_id}",
     )
     _register_auto_forwarder_task(session_id, _forwarder_task)
