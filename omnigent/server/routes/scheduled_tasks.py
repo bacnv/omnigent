@@ -182,6 +182,7 @@ def create_scheduled_tasks_router(
             agent_cache=agent_cache,
             host_store=getattr(request.app.state, "host_store", None),
             host_registry=getattr(request.app.state, "host_registry", None),
+            permission_store=permission_store,
         )
         return canonical_workspace, validated_model, validated_effort
 

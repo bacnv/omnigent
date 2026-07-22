@@ -472,6 +472,7 @@ async def _validate_fire_session_inputs(
                 agent_cache=deps.agent_cache,
                 host_store=deps.host_store,
                 host_registry=deps.host_registry,
+                permission_store=deps.permission_store,
             )
     except OmnigentError as exc:
         return exc.message, exc.code
@@ -511,11 +512,18 @@ def _make_connected_host_preflight(deps: FireDeps) -> ConnectedHostPreflight:
                 f"connected host {host_id!r} was not found",
                 error_code="host_not_found",
             )
+        # Task owner may use their own host, or any admin-owned host.
+        # Missing permission_store keeps strict ownership (auth-disabled
+        # paths already resolve owner to RESERVED_USER_LOCAL upstream).
         if task.owner_user_id is not None and host.owner != task.owner_user_id:
-            raise _CannotLaunchScheduledFire(
-                f"connected host {host_id!r} is not owned by the scheduled task owner",
-                error_code="host_not_owned",
+            admin_ok = deps.permission_store is not None and await asyncio.to_thread(
+                deps.permission_store.is_admin, host.owner
             )
+            if not admin_ok:
+                raise _CannotLaunchScheduledFire(
+                    f"connected host {host_id!r} is not owned by the scheduled task owner",
+                    error_code="host_not_owned",
+                )
         if deps.host_registry.get(host_id) is None:
             raise _CannotLaunchScheduledFire(
                 f"connected host {host_id!r} is not online on this server",

@@ -226,6 +226,166 @@ async def test_create_rejects_unsupported_public_fields(
     assert resp.status_code == 422, resp.text
 
 
+async def _wire_real_host_ownership(
+    *,
+    auth_app: FastAPI,
+    auth_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+    host_owner: str,
+    host_id: str,
+    admin: bool,
+) -> None:
+    """Undo the autouse workspace stub and exercise real host ownership."""
+    from omnigent.server.routes import _session_create_validation as scv
+    from omnigent.server.routes import _workspace_validation
+    from omnigent.stores.host_store import HostStore
+
+    # Restore the real ownership gate used by create/update.
+    monkeypatch.setattr(
+        scheduled_tasks_routes,
+        "validate_existing_host_workspace",
+        scv.validate_existing_host_workspace,
+    )
+
+    async def _fake_validate_workspace(**kwargs: object) -> str:
+        workspace = kwargs["workspace"]
+        assert isinstance(workspace, str)
+        return workspace
+
+    monkeypatch.setattr(_workspace_validation, "validate_workspace", _fake_validate_workspace)
+
+    host_store = HostStore(db_uri)
+    host_store.upsert_on_connect(host_id, "sched-host", host_owner)
+    auth_app.state.host_store = host_store
+    auth_app.state.host_registry = object()
+
+    perms = SqlAlchemyPermissionStore(db_uri)
+    perms.ensure_user(host_owner)
+    if admin:
+        perms.set_admin(host_owner, True)
+    # Caller is a regular user.
+    perms.ensure_user("alice@example.com")
+
+
+async def test_create_allows_admin_owned_host(
+    auth_app: FastAPI,
+    auth_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_id = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    await _wire_real_host_ownership(
+        auth_app=auth_app,
+        auth_client=auth_client,
+        db_uri=db_uri,
+        monkeypatch=monkeypatch,
+        host_owner="admin@example.com",
+        host_id=host_id,
+        admin=True,
+    )
+    resp = await auth_client.post(
+        "/v1/scheduled-tasks",
+        json=_create_body(host_id=host_id),
+        headers=_headers("alice@example.com"),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["owner_user_id"] == "alice@example.com"
+    assert resp.json()["host_id"] == host_id
+
+
+async def test_create_rejects_regular_cross_owner_host(
+    auth_app: FastAPI,
+    auth_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_id = "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    await _wire_real_host_ownership(
+        auth_app=auth_app,
+        auth_client=auth_client,
+        db_uri=db_uri,
+        monkeypatch=monkeypatch,
+        host_owner="bob@example.com",
+        host_id=host_id,
+        admin=False,
+    )
+    resp = await auth_client.post(
+        "/v1/scheduled-tasks",
+        json=_create_body(host_id=host_id),
+        headers=_headers("alice@example.com"),
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_update_allows_admin_owned_host(
+    auth_app: FastAPI,
+    auth_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Create under the autouse stub first (no host ownership), then switch
+    # ownership wiring and patch host_id to an admin-owned host.
+    _make_user(db_uri)
+    created = (
+        await auth_client.post(
+            "/v1/scheduled-tasks",
+            json=_create_body(),
+            headers=_headers("alice@example.com"),
+        )
+    ).json()
+    host_id = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    await _wire_real_host_ownership(
+        auth_app=auth_app,
+        auth_client=auth_client,
+        db_uri=db_uri,
+        monkeypatch=monkeypatch,
+        host_owner="admin@example.com",
+        host_id=host_id,
+        admin=True,
+    )
+    patched = await auth_client.patch(
+        f"/v1/scheduled-tasks/{created['id']}",
+        json={"host_id": host_id, "workspace": "/repo"},
+        headers=_headers("alice@example.com"),
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["host_id"] == host_id
+    assert patched.json()["owner_user_id"] == "alice@example.com"
+
+
+async def test_update_rejects_regular_cross_owner_host(
+    auth_app: FastAPI,
+    auth_client: httpx.AsyncClient,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _make_user(db_uri)
+    created = (
+        await auth_client.post(
+            "/v1/scheduled-tasks",
+            json=_create_body(),
+            headers=_headers("alice@example.com"),
+        )
+    ).json()
+    host_id = "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+    await _wire_real_host_ownership(
+        auth_app=auth_app,
+        auth_client=auth_client,
+        db_uri=db_uri,
+        monkeypatch=monkeypatch,
+        host_owner="bob@example.com",
+        host_id=host_id,
+        admin=False,
+    )
+    patched = await auth_client.patch(
+        f"/v1/scheduled-tasks/{created['id']}",
+        json={"host_id": host_id, "workspace": "/repo"},
+        headers=_headers("alice@example.com"),
+    )
+    assert patched.status_code == 403, patched.text
+
+
 async def test_update_changes_fields_and_validates_rrule(
     auth_client: httpx.AsyncClient, db_uri: str
 ) -> None:

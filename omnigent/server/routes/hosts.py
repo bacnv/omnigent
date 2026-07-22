@@ -40,7 +40,7 @@ from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import AuthProvider
 from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.routes._auth_helpers import require_user
-from omnigent.server.routes._host_launch import resolve_host_launch
+from omnigent.server.routes._host_launch import resolve_host_launch, resolve_host_owner
 from omnigent.server.schemas import SessionGitOptions
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.host_store import HostStore, host_is_live
@@ -335,7 +335,11 @@ def create_hosts_router(
         if user_id is None:
             hosts = await asyncio.to_thread(host_store.list_hosts, "local")
         else:
-            hosts = await asyncio.to_thread(host_store.list_hosts, user_id)
+            owners = {user_id}
+            if permission_store is not None:
+                accounts = await asyncio.to_thread(permission_store.list_users)
+                owners.update(a.id for a in accounts if a.is_admin)
+            hosts = await asyncio.to_thread(host_store.list_hosts_for_owners, list(owners))
 
         # One clock for the whole batch so every host is classified
         # against a consistent "now" (host_is_live's documented idiom).
@@ -384,11 +388,13 @@ def create_hosts_router(
         # exposing another user's host. user_id is None only when auth
         # is disabled entirely (single-user server).
         user_id = require_user(request, auth_provider)
-        host = await asyncio.to_thread(host_store.get_host, host_id)
-        if host is None:
-            raise HTTPException(status_code=404, detail="host not found")
-        if user_id is not None and host.owner != user_id:
-            raise HTTPException(status_code=403, detail="not your host")
+        host = await asyncio.to_thread(
+            resolve_host_owner,
+            user_id=user_id,
+            host_id=host_id,
+            host_store=host_store,
+            permission_store=permission_store,
+        )
 
         # Status comes from the DB so the answer is consistent across
         # replicas, gated on the liveness freshness window — see
@@ -734,11 +740,12 @@ def create_hosts_router(
 
         Used by the Web UI's directory picker (and stat-style
         existence checks) to render the host's filesystem before
-        any runner exists. Owner-scoped: only the host owner can
+        any runner exists. Owner-scoped: the host owner, or any
+        authenticated user when the host's owner is an admin, can
         browse. NOT scoped to a session — this endpoint exposes
-        the entire host filesystem to the authenticated host owner
-        per ``designs/SESSION_WORKSPACE_SELECTION.md`` "Security
-        surface".
+        the entire host filesystem to the owner (or any authenticated
+        user when the owner is an admin) per
+        ``designs/SESSION_WORKSPACE_SELECTION.md`` "Security surface".
 
         :param request: FastAPI request (for auth).
         :param host_id: Host identifier.
@@ -752,8 +759,8 @@ def create_hosts_router(
         :param before: Optional backward pagination cursor.
         :returns: ``{"object": "list", "data": [...], "has_more": bool}``.
         :raises HTTPException: 404 (host or path missing), 403
-            (not owner), 409 (offline), 400 (path validation),
-            504 (timeout), 502 (host I/O).
+            (not owner; owner not admin), 409 (offline), 400 (path
+            validation), 504 (timeout), 502 (host I/O).
         """
         # FastAPI's :path converter strips the leading slash from
         # the URL match. Re-add it unless the path is tilde-prefixed
@@ -798,14 +805,13 @@ def create_hosts_router(
         # past the owner check below as None (see get_host above).
         user_id = require_user(request, auth_provider)
 
-        # Owner check: load the host record, fail with 404 if it
-        # doesn't exist (don't leak existence to non-owners), fail
-        # with 403 only when an authenticated caller doesn't own it.
-        host = await asyncio.to_thread(host_store.get_host, host_id)
-        if host is None:
-            raise HTTPException(status_code=404, detail="host not found")
-        if user_id is not None and host.owner != user_id:
-            raise HTTPException(status_code=403, detail="not your host")
+        host = await asyncio.to_thread(
+            resolve_host_owner,
+            user_id=user_id,
+            host_id=host_id,
+            host_store=host_store,
+            permission_store=permission_store,
+        )
 
         if "\x00" in path:
             raise HTTPException(
@@ -863,10 +869,11 @@ def create_hosts_router(
         user can make a fresh directory to start a session in without
         dropping to a terminal. Owner-scoped exactly like the
         filesystem browse endpoints (``GET /v1/hosts/{id}/filesystem``):
-        only the host owner can create directories, and — like browse —
-        this is NOT scoped to a session. The workspace-boundary check
-        still runs at session-create time, so creating a directory here
-        does not by itself grant an agent access to it.
+        the host owner, or any authenticated user when the host's owner
+        is an admin, can create directories, and — like browse — this is
+        NOT scoped to a session. The workspace-boundary check still runs
+        at session-create time, so creating a directory here does not by
+        itself grant an agent access to it.
 
         :param request: FastAPI request (for auth).
         :param host_id: Host identifier, e.g. ``"host_a1b2c3d4..."``.
@@ -874,19 +881,22 @@ def create_hosts_router(
             tilde-prefixed) ``path`` to create.
         :returns: ``{"object": "directory", "path": "<created abs path>"}``.
         :raises HTTPException: 404 if host not found, 403 if not owned
-            by caller, 409 if host is offline or the directory could not
-            be created (already exists / permission denied), 400 on path
-            validation, 504 on host timeout, 502 on host I/O failure.
+            by caller (or owner is not admin), 409 if host is offline or
+            the directory could not be created (already exists / permission
+            denied), 400 on path validation, 504 on host timeout, 502 on
+            host I/O failure.
         """
         # require_user: unauthenticated callers 401 instead of slipping
         # past the owner check below as None.
         user_id = require_user(request, auth_provider)
 
-        host = await asyncio.to_thread(host_store.get_host, host_id)
-        if host is None:
-            raise HTTPException(status_code=404, detail="host not found")
-        if user_id is not None and host.owner != user_id:
-            raise HTTPException(status_code=403, detail="not your host")
+        host = await asyncio.to_thread(
+            resolve_host_owner,
+            user_id=user_id,
+            host_id=host_id,
+            host_store=host_store,
+            permission_store=permission_store,
+        )
 
         path = body.path
         if not path.strip():
@@ -945,9 +955,11 @@ def create_hosts_router(
 
         Used by the Web UI's new-session worktree picker to show the
         worktrees a session can start in directly. Owner-scoped exactly
-        like the filesystem browse endpoints; NOT scoped to a session.
-        A path that is not a git repository is reported as 400 so the
-        picker can quietly fall back to "no worktrees".
+        like the filesystem browse endpoints (host owner, or any
+        authenticated user when the host's owner is an admin); NOT
+        scoped to a session. A path that is not a git repository is
+        reported as 400 so the picker can quietly fall back to "no
+        worktrees".
 
         :param request: FastAPI request (for auth).
         :param host_id: Host identifier, e.g. ``"host_a1b2c3d4..."``.
@@ -956,8 +968,8 @@ def create_hosts_router(
         :returns: ``{"object": "list", "data": [{path, branch,
             is_main, detached}, ...]}`` (main first).
         :raises HTTPException: 404 if host not found, 403 if not owned
-            by caller, 409 if host is offline/unresponsive, 400 on path
-            validation or a non-git path.
+            by caller (or owner is not admin), 409 if host is
+            offline/unresponsive, 400 on path validation or a non-git path.
         """
         from omnigent.server.routes._host_worktree import (
             WorktreeHostUnavailableError,
@@ -969,11 +981,13 @@ def create_hosts_router(
         # past the owner check below as None.
         user_id = require_user(request, auth_provider)
 
-        host = await asyncio.to_thread(host_store.get_host, host_id)
-        if host is None:
-            raise HTTPException(status_code=404, detail="host not found")
-        if user_id is not None and host.owner != user_id:
-            raise HTTPException(status_code=403, detail="not your host")
+        host = await asyncio.to_thread(
+            resolve_host_owner,
+            user_id=user_id,
+            host_id=host_id,
+            host_store=host_store,
+            permission_store=permission_store,
+        )
 
         if not path.strip():
             raise HTTPException(status_code=400, detail="path must not be empty")

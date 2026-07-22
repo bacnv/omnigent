@@ -51,9 +51,10 @@ def resolve_host_owner(
     user_id: str | None,
     host_id: str,
     host_store: HostStore,
+    permission_store: PermissionStore | None = None,
 ) -> Host:
     """
-    Authorize that the caller owns a known host.
+    Authorize that the caller may act on a known host.
 
     Every route that reaches a host on the caller's behalf must pass
     this first so the owner check can't drift between them: the runner
@@ -63,20 +64,32 @@ def resolve_host_owner(
     any ownership check. When ``user_id`` is ``None`` (auth disabled)
     the check is skipped, consistent with single-user/local behavior.
 
+    A caller who does not own the host is still authorized when the
+    host's owner is an admin (``permission_store.is_admin(host.owner)``)
+    — admin-owned hosts are usable (not just visible) by every
+    authenticated user. This does not touch destructive/registration
+    paths, which call their own owner-only checks directly instead of
+    this function.
+
     :param user_id: Authenticated caller, e.g. ``"alice@example.com"``,
         or ``None`` when auth is disabled.
     :param host_id: Target host id, e.g. ``"host_a1b2c3d4..."``.
     :param host_store: Persistent host registrations.
-    :returns: The host record owned by the caller.
+    :param permission_store: Used to check whether the host's owner is
+        an admin. ``None`` disables the admin bypass (falls back to
+        strict ownership), consistent with other auth-disabled paths.
+    :returns: The host record the caller is authorized to use.
     :raises HTTPException: 404 if the host is unknown; 403 if it is
-        owned by a different user.
+        owned by a different, non-admin user.
     """
     host = host_store.get_host(host_id)
     if host is None:
         raise HTTPException(status_code=404, detail="host not found")
-    if user_id is not None and host.owner != user_id:
-        raise HTTPException(status_code=403, detail="not your host")
-    return host
+    if user_id is None or host.owner == user_id:
+        return host
+    if permission_store is not None and permission_store.is_admin(host.owner):
+        return host
+    raise HTTPException(status_code=403, detail="not your host")
 
 
 def resolve_host_launch(
@@ -92,7 +105,7 @@ def resolve_host_launch(
     """
     Resolve and authorize a host runner launch.
 
-    Verifies the host exists, is owned by the caller, and is online,
+    Verifies the host exists, is usable by the caller, and is online,
     and that the caller owns the target session, before any runner is
     spawned. When ``user_id`` is ``None`` (auth disabled) the host-owner
     check is skipped; when ``permission_store`` is ``None`` (auth
@@ -109,18 +122,20 @@ def resolve_host_launch(
     :param conversation_store: Conversation lookups (also used by the
         session-access check for sub-agent parent delegation).
     :param permission_store: Session permission store, or ``None`` to
-        skip the session-owner check (auth disabled).
+        skip the session-owner check (auth disabled). Also used by
+        :func:`resolve_host_owner` for the admin-owned-host bypass.
     :returns: A :class:`HostLaunchTarget` with the validated host,
         connection, and conversation.
     :raises HTTPException: 404 if the host or session is missing (or the
         session is not owned by the caller — 404, not 403, so other
         users' sessions aren't enumerable); 403 if the host is owned by
-        a different user; 409 if the host is offline.
+        a different non-admin user; 409 if the host is offline.
     """
     host = resolve_host_owner(
         user_id=user_id,
         host_id=host_id,
         host_store=host_store,
+        permission_store=permission_store,
     )
 
     conn = host_registry.get(host_id)

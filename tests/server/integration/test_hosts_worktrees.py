@@ -248,3 +248,71 @@ async def test_list_worktrees_unknown_host_404(
         )
     # No host record exists for this id → 404, not 409 ("offline").
     assert resp.status_code == 404, resp.text
+
+
+async def test_list_worktrees_admin_owned_allowed_regular_denied(
+    wt_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    db_uri: str,
+) -> None:
+    """Admin-owned host worktree list is allowed; regular cross-owner still 403s."""
+    from omnigent.server.auth import AuthProvider
+    from omnigent.stores.permission_store.sqlalchemy_store import (
+        SqlAlchemyPermissionStore,
+    )
+
+    _app, _reg, host_store, conv_store = wt_app
+
+    class _Stub(AuthProvider):
+        def get_user_id(self, request: Any) -> str | None:
+            return request.headers.get("X-Test-User")
+
+    auth = _Stub()
+    permission_store = SqlAlchemyPermissionStore(db_uri)
+    permission_store.ensure_user("admin@example.com")
+    permission_store.set_admin("admin@example.com", True)
+    permission_store.ensure_user("bob@example.com")
+
+    auth_app = FastAPI()
+    registry = HostRegistry()
+    auth_app.include_router(
+        create_host_tunnel_router(registry, host_store, auth_provider=auth),
+        prefix="/v1",
+    )
+    auth_app.include_router(
+        create_hosts_router(
+            registry,
+            host_store,
+            conv_store,
+            auth_provider=auth,
+            permission_store=permission_store,
+        ),
+        prefix="/v1",
+    )
+
+    host_store.upsert_on_connect(
+        host_id="a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+        name="admin-laptop",
+        owner="admin@example.com",
+    )
+    host_store.upsert_on_connect(
+        host_id="b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8",
+        name="bob-laptop",
+        owner="bob@example.com",
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=auth_app), base_url="http://test"
+    ) as client:
+        admin_resp = await client.get(
+            "/v1/hosts/a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7/worktrees",
+            params={"path": "/Users/corey/repo"},
+            headers={"X-Test-User": "alice@example.com"},
+        )
+        deny_resp = await client.get(
+            "/v1/hosts/b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8/worktrees",
+            params={"path": "/Users/corey/repo"},
+            headers={"X-Test-User": "alice@example.com"},
+        )
+
+    assert admin_resp.status_code != 403, admin_resp.text
+    assert deny_resp.status_code == 403, deny_resp.text

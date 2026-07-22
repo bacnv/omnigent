@@ -102,6 +102,7 @@ async def validate_existing_host_workspace(
     agent_cache: AgentCache | None,
     host_store: Any | None,
     host_registry: Any | None,
+    permission_store: PermissionStore | None = None,
 ) -> str:
     """Validate a connected-host workspace against the agent's os_env boundary."""
     from omnigent.server.routes._workspace_validation import (
@@ -138,8 +139,9 @@ async def validate_existing_host_workspace(
     # Authorize host ownership FIRST — before loading the agent spec or the
     # host.stat round-trip below. A non-owner must be rejected (403/404 via the
     # shared resolve_host_owner) before we touch the host or even read the agent
-    # bundle (cross-user host probe). The returned host also gives the display
-    # name for error messages.
+    # bundle (cross-user host probe). Admin-owned hosts are usable by any
+    # authenticated caller when permission_store is provided. The returned host
+    # also gives the display name for error messages.
     host_name: str | None = None
     if host_store is not None:
         host = await asyncio.to_thread(
@@ -147,6 +149,7 @@ async def validate_existing_host_workspace(
             user_id=user_id,
             host_id=host_id,
             host_store=host_store,
+            permission_store=permission_store,
         )
         host_name = host.name
 

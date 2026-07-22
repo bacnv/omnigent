@@ -620,6 +620,37 @@ class HostStore:
             )
             return [_row_to_host(row) for row in rows]
 
+    def list_hosts_for_owners(self, owners: list[str]) -> list[Host]:
+        """
+        List all hosts owned by any of the given users.
+
+        Bulk variant of :meth:`list_hosts` for merging a caller's own
+        hosts with every admin's hosts in one query — ``GET /v1/hosts``
+        exposes admin-owned hosts to every user, so it needs one
+        ``WHERE owner IN (...)`` instead of one :meth:`list_hosts` call
+        per admin.
+
+        :param owners: User IDs to filter by, e.g.
+            ``["alice@example.com", "admin@example.com"]``. Duplicates
+            are tolerated (deduped via the IN-clause); empty input
+            returns an empty list without touching the database.
+        :returns: List of :class:`Host` entities across all given
+            owners, ordered by ``updated_at`` descending.
+        """
+        if not owners:
+            return []
+        with self._session() as session:
+            rows = (
+                session.query(SqlHost)
+                .filter(
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.owner.in_(set(owners)),
+                )
+                .order_by(SqlHost.updated_at.desc())
+                .all()
+            )
+            return [_row_to_host(row) for row in rows]
+
     def get_host(self, host_id: str) -> Host | None:
         """
         Fetch a single host by ID.

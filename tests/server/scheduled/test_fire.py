@@ -137,11 +137,12 @@ class FakeConversationStore:
 
 
 class FakePermissionStore:
-    def __init__(self, *, fail_grant: bool = False) -> None:
+    def __init__(self, *, fail_grant: bool = False, admins: set[str] | None = None) -> None:
         self.ensured: list[str] = []
         self.grants: list[tuple[str, str, int]] = []
         self.grant_workspace_ids: list[int] = []
         self.fail_grant = fail_grant
+        self.admins = admins or set()
 
     def ensure_user(self, user_id: str, *, is_admin: bool = False) -> None:
         self.ensured.append(user_id)
@@ -152,6 +153,9 @@ class FakePermissionStore:
             raise RuntimeError("grant failed")
         self.grants.append((user_id, conversation_id, level))
         return None
+
+    def is_admin(self, user_id: str) -> bool:
+        return user_id in getattr(self, "admins", set())
 
 
 @dataclass
@@ -618,6 +622,127 @@ async def test_offline_connected_host_records_failed_without_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cross_owner_host_records_host_not_owned() -> None:
+    """Regular cross-owner connected-host fire is denied as host_not_owned."""
+    conv_store = FakeConversationStore()
+    store = FakeScheduledTaskStore(rows={"task_1": _task(owner_user_id="alice@example.com")})
+
+    on_fire = build_on_fire(
+        _deps(
+            store,
+            conversation_store=conv_store,
+            host_store=FakeHostStore({"host_1": _FakeHost("host_1", "bob@example.com")}),
+            host_registry=FakeHostRegistry(online={"host_1"}),
+        )
+    )
+    await on_fire(0, "task_1")
+    await _drain()
+
+    assert conv_store.created == []
+    assert len(store.runs) == 1
+    assert store.runs[0]["status"] == "failed"
+    assert store.runs[0]["error_code"] == "host_not_owned"
+    assert store.runs[0]["conversation_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_admin_owned_host_preflight_allows_and_grants_task_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admin-owned host passes both preflights; session belongs to task owner."""
+    conv_store = FakeConversationStore()
+    perm = FakePermissionStore(admins={"admin@example.com"})
+    store = FakeScheduledTaskStore(rows={"task_1": _task(owner_user_id="alice@example.com")})
+    launched: list[Any] = []
+
+    async def _launch(conv: Any, task: Any) -> None:
+        launched.append((conv, task))
+
+    # Shared workspace validation would otherwise need agent_cache/host.stat.
+    # Stub the validate path to only exercise ownership plumbing.
+    async def _ok_validate(**kwargs: Any) -> str:
+        assert kwargs["user_id"] == "alice@example.com"
+        return kwargs["workspace"]
+
+    monkeypatch.setattr(
+        fire_mod,
+        "validate_existing_host_workspace",
+        _ok_validate,
+    )
+
+    on_fire = build_on_fire(
+        _deps(
+            store,
+            conversation_store=conv_store,
+            permission_store=perm,
+            host_store=FakeHostStore({"host_1": _FakeHost("host_1", "admin@example.com")}),
+            host_registry=FakeHostRegistry(online={"host_1"}),
+        ),
+        launch_dispatch=_launch,
+    )
+    await on_fire(0, "task_1")
+    await _drain()
+
+    assert len(launched) == 1
+    conv, task = launched[0]
+    assert task.owner_user_id == "alice@example.com"
+    assert conv_store.created
+    # Ownership grant is for the scheduled task owner, not the host admin.
+    assert ("alice@example.com", conv.id, LEVEL_OWNER) in perm.grants
+    assert not any(g[0] == "admin@example.com" for g in perm.grants)
+    assert len(store.runs) == 1
+    assert store.runs[0]["status"] == "running"
+    assert store.runs[0]["conversation_id"] == conv.id
+
+
+@pytest.mark.asyncio
+async def test_admin_owned_host_both_preflights_agree_on_allow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Early preflight and shared workspace validation both allow admin hosts."""
+    host_store = FakeHostStore({"host_1": _FakeHost("host_1", "admin@example.com")})
+    perm = FakePermissionStore(admins={"admin@example.com"})
+    deps = _deps(
+        FakeScheduledTaskStore(),
+        permission_store=perm,
+        host_store=host_store,
+        host_registry=FakeHostRegistry(online={"host_1"}),
+    )
+    task = _task(owner_user_id="alice@example.com")
+
+    preflight = fire_mod._make_connected_host_preflight(deps)
+    await preflight(task)  # must not raise
+
+    seen: dict[str, Any] = {}
+
+    async def _capture(**kwargs: Any) -> str:
+        seen.update(kwargs)
+        return kwargs["workspace"]
+
+    monkeypatch.setattr(fire_mod, "validate_existing_host_workspace", _capture)
+    err = await fire_mod._validate_fire_session_inputs(deps, task, validate_workspace=True)
+    assert err is None
+    assert seen["user_id"] == "alice@example.com"
+    assert seen["host_id"] == "host_1"
+
+
+@pytest.mark.asyncio
+async def test_missing_host_still_host_not_found() -> None:
+    conv_store = FakeConversationStore()
+    store = FakeScheduledTaskStore(rows={"task_1": _task(owner_user_id="alice@example.com")})
+    on_fire = build_on_fire(
+        _deps(
+            store,
+            conversation_store=conv_store,
+            host_store=FakeHostStore({}),
+            host_registry=FakeHostRegistry(online=set()),
+        )
+    )
+    await on_fire(0, "task_1")
+    await _drain()
+    assert store.runs[0]["error_code"] == "host_not_found"
+
+
 async def test_managed_sandbox_is_skipped_and_recorded() -> None:
     """Managed-sandbox targets are recorded as skipped and do not launch."""
     store = FakeScheduledTaskStore(rows={"task_1": _task(execution_target="managed_sandbox")})

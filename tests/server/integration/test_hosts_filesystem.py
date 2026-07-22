@@ -534,6 +534,63 @@ async def test_list_filesystem_owner_check_blocks_other_users(
     assert resp.status_code == 403
 
 
+async def test_list_filesystem_admin_owned_host_allowed_for_other_user(
+    fs_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    db_uri: str,
+) -> None:
+    """A regular user CAN browse an admin-owned host's filesystem."""
+    from omnigent.server.auth import AuthProvider
+    from omnigent.stores.permission_store.sqlalchemy_store import (
+        SqlAlchemyPermissionStore,
+    )
+
+    _app, _reg, host_store, conv_store = fs_app
+
+    class _Stub(AuthProvider):
+        def get_user_id(self, request: Any) -> str | None:
+            return request.headers.get("X-Test-User")
+
+    auth = _Stub()
+    permission_store = SqlAlchemyPermissionStore(db_uri)
+    permission_store.ensure_user("alice@example.com")
+    permission_store.set_admin("alice@example.com", True)
+
+    auth_app = FastAPI()
+    registry = HostRegistry()
+    auth_app.include_router(
+        create_host_tunnel_router(registry, host_store, auth_provider=auth),
+        prefix="/v1",
+    )
+    auth_app.include_router(
+        create_hosts_router(
+            registry,
+            host_store,
+            conv_store,
+            auth_provider=auth,
+            permission_store=permission_store,
+        ),
+        prefix="/v1",
+    )
+
+    host_store.upsert_on_connect(
+        host_id="e5f60718293a4b5c6d7e8f901a2b3c4d",
+        name="alice-laptop",
+        owner="alice@example.com",
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=auth_app), base_url="http://test"
+    ) as client:
+        resp = await client.get(
+            "/v1/hosts/e5f60718293a4b5c6d7e8f901a2b3c4d/filesystem",
+            headers={"X-Test-User": "bob@example.com"},
+        )
+    # 409 offline is fine — only ownership is under test.
+    assert resp.status_code != 403, (
+        f"Expected admin-owner bypass to pass ownership, got 403: {resp.text}"
+    )
+
+
 # ── Pagination ──────────────────────────────────────────
 
 
