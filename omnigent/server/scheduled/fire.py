@@ -707,6 +707,7 @@ async def _validate_fire_session_inputs(
                 agent_cache=deps.agent_cache,
                 host_store=deps.host_store,
                 host_registry=deps.host_registry,
+                permission_store=deps.permission_store,
             )
     except OmnigentError as exc:
         return exc.message, exc.code
@@ -749,10 +750,14 @@ async def _authorize_pinned_host(deps: FireDeps, task: ScheduledTask, host_id: s
             error_code="host_not_found",
         )
     if task.user_id is not None and host.user_id != task.user_id:
-        raise _CannotLaunchScheduledFire(
-            f"connected host {host_id!r} is not owned by the scheduled task owner",
-            error_code="host_not_owned",
+        admin_ok = deps.permission_store is not None and await asyncio.to_thread(
+            deps.permission_store.is_admin, host.user_id
         )
+        if not admin_ok:
+            raise _CannotLaunchScheduledFire(
+                f"connected host {host_id!r} is not owned by the scheduled task owner",
+                error_code="host_not_owned",
+            )
 
 
 def _make_connected_host_preflight(deps: FireDeps) -> ConnectedHostPreflight:
