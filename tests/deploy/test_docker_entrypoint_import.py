@@ -85,6 +85,34 @@ def test_entrypoint_imports_without_side_effects(
         assert module_name not in sys.modules
 
 
+def test_build_app_mounts_projects_crud(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The Docker startup path must wire the first-class project store."""
+    from deploy.docker.entrypoint import _ResolvedConfig, build_app, run_migrations
+
+    database_url = f"sqlite:///{tmp_path / 'omnigent.db'}"
+    monkeypatch.setenv("OMNIGENT_AUTH_ENABLED", "0")
+    run_migrations(database_url)
+    built = build_app(
+        _ResolvedConfig(
+            cfg={},
+            database_url=database_url,
+            artifact_dir=tmp_path / "artifacts",
+            artifact_store_uri=None,
+            host="127.0.0.1",
+            port=8000,
+        )
+    )
+
+    methods = {
+        (route.path, method)
+        for route in built.app.routes
+        if hasattr(route, "methods")
+        for method in route.methods or ()
+    }
+    assert ("/v1/projects", "POST") in methods
+    assert ("/v1/projects/{project_id}", "PATCH") in methods
+
+
 # ── artifact-store resolution + selection ────────────────────────────────
 # OMNIGENT_ARTIFACT_URI=s3://… selects the remote S3ArtifactStore (durable on an
 # ephemeral/multi-replica deploy); anything else falls back to local. The URI is
