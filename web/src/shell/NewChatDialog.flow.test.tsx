@@ -48,7 +48,11 @@ vi.mock("@/store/chatStore", () => ({
   setPendingInitialPrompt: (...args: unknown[]) => setPendingInitialPromptMock(...args),
 }));
 
-vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
+vi.mock("@/lib/identity", () => ({
+  authenticatedFetch: vi.fn(),
+  getCurrentUserId: () => null,
+  resolveIdentity: () => Promise.resolve(null),
+}));
 vi.mock("@/hooks/useHosts", () => ({
   useHosts: vi.fn(),
   useHostModelOptions: vi.fn(() => ({
@@ -199,7 +203,7 @@ function openSelect(testId: string): void {
 /** Open the config-modal Select at <triggerTestId> and click the option labeled <label>. */
 function pickSelectOption(triggerTestId: string, label: string): void {
   openSelect(triggerTestId);
-  fireEvent.click(screen.getByText(label));
+  fireEvent.click(screen.getAllByText(label).at(-1)!);
 }
 
 /** Close the config modal by clicking Save (commits the draft). */
@@ -781,7 +785,7 @@ describe("NewChatLandingScreen create flow", () => {
     expect(body.terminal_launch_args).toBeUndefined();
   });
 
-  it("omits model + effort on create when the picker is untouched for claude-native", async () => {
+  it("defaults to Sonnet and high effort on create for Claude native", async () => {
     setAgents([agent({ id: "ag_native", name: "claude-native-ui", display_name: "Claude Code" })]);
     vi.mocked(authenticatedFetch).mockResolvedValueOnce({
       ok: true,
@@ -790,17 +794,14 @@ describe("NewChatLandingScreen create flow", () => {
 
     renderLanding();
     await waitForWorkspaceSeed();
-    // No model/effort default is forced: leaving the picker untouched omits
-    // both from the create (undefined is dropped by JSON.stringify), so Claude
-    // Code launches on its own configured model rather than a UI-forced one.
     typeMessage("go");
     fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
 
     await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(1));
     const [, init] = vi.mocked(authenticatedFetch).mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string);
-    expect(body.model_override).toBeUndefined();
-    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.model_override).toBe("sonnet");
+    expect(body.reasoning_effort).toBe("high");
   });
 
   it("rides a picked model + effort along to create for claude-native", async () => {
@@ -879,10 +880,9 @@ describe("NewChatLandingScreen create flow", () => {
     });
   });
 
-  it("ignores a retired stored model id and omits the override on create", async () => {
-    // A stale stored model no longer in the picker's vocab must not ride along —
-    // resolve to unselected so the create never posts a dead model id (and the
-    // valid stored effort still seeds).
+  it("defaults a retired stored model id to Sonnet on create", async () => {
+    // A stale stored model no longer in the picker's vocab must not ride along;
+    // the valid stored effort is preserved and model falls back to Sonnet.
     localStorage.setItem(
       "omnigent:last-mode-by-harness",
       JSON.stringify({ "claude-native": { model: "ancient-model", effort: "high" } }),
@@ -901,7 +901,7 @@ describe("NewChatLandingScreen create flow", () => {
     await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(1));
     const [, init] = vi.mocked(authenticatedFetch).mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string);
-    expect(body.model_override).toBeUndefined();
+    expect(body.model_override).toBe("sonnet");
     expect(body.reasoning_effort).toBe("high");
   });
 

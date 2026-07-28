@@ -66,7 +66,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { authenticatedFetch } from "@/lib/identity";
+import { authenticatedFetch, getCurrentUserId, resolveIdentity } from "@/lib/identity";
 import { isImeCompositionKeyEvent } from "@/lib/ime";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
@@ -1762,6 +1762,16 @@ export function NewChatLandingScreen() {
   const [pickedAgentId, setPickedAgentId] = useState<string | null>(
     () => landingDraft?.pickedAgentId ?? (projectParam !== "" ? null : readLastAgentId()),
   );
+  const [currentUserId, setCurrentUserId] = useState(() => getCurrentUserId());
+  useEffect(() => {
+    let cancelled = false;
+    void resolveIdentity().then(() => {
+      if (!cancelled) setCurrentUserId(getCurrentUserId());
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [selectedHostId, setSelectedHostId] = useState<string | null>(
     () => landingDraft?.selectedHostId ?? null,
   );
@@ -2130,18 +2140,20 @@ export function NewChatLandingScreen() {
   );
 
   // Seed the working directory once per host, into an empty field only, so an
-  // explicit pick isn't clobbered. Prefer the most-recent path; else the
-  // derived home (which can arrive a render later, hence the dep). Holds
-  // off while a project prefill is deciding on a workspace of its own.
+  // explicit pick isn't clobbered. Prefer the most-recent path, then the
+  // authenticated user's directory, then the host home. Holds off while a
+  // project prefill is deciding on a workspace of its own.
   useEffect(() => {
-    if (!prefillSettled) return;
-    if (selectedHostId === null) return;
+    if (!prefillSettled || sandboxSelected || selectedHostId === null) return;
     if (seededHostRef.current === selectedHostId) return;
-    const candidate = recent[0] ?? derivedHome;
+    const candidate =
+      recent[0] ??
+      defaultUserWorkspace(derivedHome ?? "", currentUserId ?? "") ??
+      derivedHome;
     if (!candidate) return;
     seededHostRef.current = selectedHostId;
     setWorkspace((cur) => (cur === "" ? candidate : cur));
-  }, [selectedHostId, recent, derivedHome, prefillSettled]);
+  }, [selectedHostId, recent, derivedHome, currentUserId, prefillSettled, sandboxSelected]);
 
   // A pick only wins while it exists in the list — a persisted id whose
   // agent has since been unregistered (or hidden) falls back to the default.
@@ -2151,10 +2163,13 @@ export function NewChatLandingScreen() {
   // bundled agent. So a pending pick made before switching to a sandbox is
   // dropped there, falling back to a real agent; off the sandbox it's kept.
   const pendingAgentAllowedOnTarget = !sandboxSelected;
+  const defaultClaudeAgentId = agentList.find((a) => a.name === "claude-native-ui")?.id;
   const effectiveAgentId =
     pickedAgentId === PENDING_AGENT_ID && pendingAgentAllowedOnTarget
       ? PENDING_AGENT_ID
-      : ((agentList.some((a) => a.id === pickedAgentId) ? pickedAgentId : agentList[0]?.id) ??
+      : ((agentList.some((a) => a.id === pickedAgentId)
+          ? pickedAgentId
+          : (defaultClaudeAgentId ?? agentList[0]?.id)) ??
         null);
   const selectedAgent = useMemo(
     () =>
@@ -2306,19 +2321,17 @@ export function NewChatLandingScreen() {
       setPermissionMode(
         resolve(CLAUDE_NATIVE_PERMISSION_MODES, CLAUDE_NATIVE_DEFAULT_PERMISSION_MODE),
       );
-      // The model + effort picker remembers its own last pick (same per-harness
-      // snapshot the mode knob uses), validated against the current vocab. With
-      // nothing stored (or a retired id) it resolves to "" — unselected, so the
-      // create omits the override and Claude Code uses its own configured model.
+      // Persisted choices and a landing draft win; fresh Claude-native sessions
+      // start on Sonnet with high effort.
       setPickedModel(
         stored.model != null && claudeModelOptions.some((m) => m.id === stored.model)
           ? stored.model
-          : "",
+          : (landingDraft?.pickedModel ?? "sonnet"),
       );
       setPickedEffort(
         stored.effort != null && CLAUDE_NATIVE_EFFORTS.some((e) => e.value === stored.effort)
           ? stored.effort
-          : "",
+          : (landingDraft?.pickedEffort ?? "high"),
       );
     } else if (supportsApprovalMode) {
       setApprovalMode(resolve(CODEX_NATIVE_APPROVAL_MODES, CODEX_NATIVE_DEFAULT_APPROVAL_MODE));
