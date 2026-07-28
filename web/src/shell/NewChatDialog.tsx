@@ -768,6 +768,20 @@ export function deriveHomeDir(entries: HostFilesystemEntry[]): string | null {
 }
 
 /**
+ * Build a default workspace path from a home directory and a username.
+ *
+ * Returns ``null`` when the username is blank, contains path separators, or
+ * could be used for directory traversal — the caller should leave the field
+ * empty in that case rather than risk an unsafe default.
+ */
+export function defaultUserWorkspace(home: string, username: string): string | null {
+  const base = home === "/" ? "" : home.replace(/\/+$/, "");
+  const user = username.trim();
+  if (user !== username || !/^[a-zA-Z0-9_-]+$/.test(user)) return null;
+  return `${base}/${user}`;
+}
+
+/**
  * The home-page ("/") landing composer.
  *
  * Owns session creation end-to-end: the textarea is the first message and the

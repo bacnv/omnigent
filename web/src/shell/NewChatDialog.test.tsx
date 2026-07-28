@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import {
   composeSandboxWorkspace,
+  defaultUserWorkspace,
   deriveHomeDir,
   deriveRepoName,
   describeCreateError,
@@ -440,6 +441,21 @@ describe("deriveHomeDir", () => {
     // than seeding a wrong path.
     expect(deriveHomeDir([])).toBeNull();
   });
+});
+
+describe("defaultUserWorkspace", () => {
+  it.each([
+    ["/home/claude", "bacnv", "/home/claude/bacnv"],
+    ["/root", "bacnv", "/root/bacnv"],
+    ["/", "bacnv", "/bacnv"],
+  ])("builds the default workspace", (home, username, expected) => {
+    expect(defaultUserWorkspace(home, username)).toBe(expected);
+  });
+
+  it.each(["", ".", "..", "../escape", "/absolute", "a/b", "a\\b", " alice "])(
+    "rejects unsafe username %s",
+    (username) => expect(defaultUserWorkspace("/home/claude", username)).toBeNull(),
+  );
 });
 
 // A failed POST /v1/sessions must surface a reason, not silently
