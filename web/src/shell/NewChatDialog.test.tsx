@@ -452,9 +452,20 @@ describe("defaultUserWorkspace", () => {
     expect(defaultUserWorkspace(home, username)).toBe(expected);
   });
 
-  it.each(["", ".", "..", "../escape", "/absolute", "a/b", "a\\b", " alice "])(
-    "rejects unsafe username %s",
-    (username) => expect(defaultUserWorkspace("/home/claude", username)).toBeNull(),
+  it.each([
+    "",
+    ".",
+    "..",
+    "../escape",
+    "/absolute",
+    "a/b",
+    "a\\b",
+    " alice ",
+    "Alice",
+    "bac.nv",
+    "bac@nv",
+  ])("rejects unsafe username %s", (username) =>
+    expect(defaultUserWorkspace("/home/claude", username)).toBeNull(),
   );
 });
 

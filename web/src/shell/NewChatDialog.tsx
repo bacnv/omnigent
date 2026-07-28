@@ -777,7 +777,7 @@ export function deriveHomeDir(entries: HostFilesystemEntry[]): string | null {
 export function defaultUserWorkspace(home: string, username: string): string | null {
   const base = home === "/" ? "" : home.replace(/\/+$/, "");
   const user = username.trim();
-  if (user !== username || !/^[a-zA-Z0-9_-]+$/.test(user)) return null;
+  if (user !== username || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(user)) return null;
   return `${base}/${user}`;
 }
 
