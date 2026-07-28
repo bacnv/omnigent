@@ -2160,10 +2160,13 @@ export function NewChatLandingScreen() {
     const candidate = recent[0] ?? userDir ?? derivedHome;
     if (!candidate) return;
     seededHostRef.current = selectedHostId;
-    // Track whether the seed came from defaultUserWorkspace — the directory
-    // may not exist yet, so handleCreate ensures it before session creation.
-    workspaceWasDefaultedRef.current = candidate === userDir && recent[0] == null;
-    setWorkspace((cur) => (cur === "" ? candidate : cur));
+    setWorkspace((cur) => {
+      if (cur !== "") return cur;
+      // Track whether the seed came from defaultUserWorkspace — the directory
+      // may not exist yet, so handleCreate ensures it before session creation.
+      workspaceWasDefaultedRef.current = candidate === userDir && recent[0] == null;
+      return candidate;
+    });
   }, [selectedHostId, recent, derivedHome, currentUserId, prefillSettled, sandboxSelected]);
 
   // A pick only wins while it exists in the list — a persisted id whose
@@ -2514,6 +2517,9 @@ export function NewChatLandingScreen() {
       if (pickedAgentId === null) setPickedHarness(readLastHarness(writes.agentId));
     }
     if (writes.workspace !== undefined) {
+      // Project-supplied workspaces are explicit choices, not generated
+      // defaults, so directory creation must be skipped for them.
+      workspaceWasDefaultedRef.current = false;
       setWorkspace((cur) => (cur === "" ? writes.workspace! : cur));
     }
     setPrefill(step.state);
