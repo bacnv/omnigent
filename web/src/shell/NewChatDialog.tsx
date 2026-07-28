@@ -775,6 +775,7 @@ export function deriveHomeDir(entries: HostFilesystemEntry[]): string | null {
  * empty in that case rather than risk an unsafe default.
  */
 export function defaultUserWorkspace(home: string, username: string): string | null {
+  if (!home.trim()) return null;
   const base = home === "/" ? "" : home.replace(/\/+$/, "");
   const user = username.trim();
   if (user !== username || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(user)) return null;
@@ -2148,7 +2149,7 @@ export function NewChatLandingScreen() {
     if (seededHostRef.current === selectedHostId) return;
     const candidate =
       recent[0] ??
-      defaultUserWorkspace(derivedHome ?? "", currentUserId ?? "") ??
+      (derivedHome != null ? defaultUserWorkspace(derivedHome, currentUserId ?? "") : null) ??
       derivedHome;
     if (!candidate) return;
     seededHostRef.current = selectedHostId;

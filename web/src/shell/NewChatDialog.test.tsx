@@ -471,6 +471,9 @@ describe("defaultUserWorkspace", () => {
   ])("rejects unsafe username %s", (username) =>
     expect(defaultUserWorkspace("/home/claude", username)).toBeNull(),
   );
+  it.each(["", " ", "  "])("returns null for blank home %j", (home) =>
+    expect(defaultUserWorkspace(home, "bacnv")).toBeNull(),
+  );
 });
 
 // A failed POST /v1/sessions must surface a reason, not silently
