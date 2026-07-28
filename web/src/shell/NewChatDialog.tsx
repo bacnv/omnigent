@@ -139,7 +139,11 @@ import { useDictationInsert } from "@/hooks/useDictationInsert";
 import { useRecentWorkspaces } from "@/hooks/useRecentWorkspaces";
 import { useDirectorySessions } from "@/hooks/useDirectorySessions";
 import { useRunnerHealthRegistration } from "@/hooks/RunnerHealthProvider";
-import { useHostFilesystem, type HostFilesystemEntry } from "@/hooks/useHostFilesystem";
+import {
+  useHostFilesystem,
+  createHostDirectory,
+  type HostFilesystemEntry,
+} from "@/hooks/useHostFilesystem";
 import { useHostWorktrees } from "@/hooks/useHostWorktrees";
 import { useNativeServerSwitcherForMainSurface } from "@/hooks/useNativeServerSwitcher";
 import type { WorkspaceFile } from "@/hooks/useWorkspaceChangedFiles";
@@ -2044,6 +2048,10 @@ export function NewChatLandingScreen() {
   // Host whose workspace was already seeded once, so a host re-pick doesn't
   // clobber the field (used by the per-host seeding effect below).
   const seededHostRef = useRef<string | null>(null);
+  // True when the seeded workspace came from defaultUserWorkspace() — the path
+  // may not exist yet, so handleCreate ensures the directory before creating
+  // the session. Cleared when the user picks a workspace explicitly.
+  const workspaceWasDefaultedRef = useRef(false);
   // Workspace the opt-in worktree effect already acted on, so it fires at most
   // once per settled workspace (and can't loop once it sets a branch name).
   const worktreeSeededForRef = useRef<string | null>(null);
@@ -2147,12 +2155,14 @@ export function NewChatLandingScreen() {
   useEffect(() => {
     if (!prefillSettled || sandboxSelected || selectedHostId === null) return;
     if (seededHostRef.current === selectedHostId) return;
-    const candidate =
-      recent[0] ??
-      (derivedHome != null ? defaultUserWorkspace(derivedHome, currentUserId ?? "") : null) ??
-      derivedHome;
+    const userDir =
+      derivedHome != null ? defaultUserWorkspace(derivedHome, currentUserId ?? "") : null;
+    const candidate = recent[0] ?? userDir ?? derivedHome;
     if (!candidate) return;
     seededHostRef.current = selectedHostId;
+    // Track whether the seed came from defaultUserWorkspace — the directory
+    // may not exist yet, so handleCreate ensures it before session creation.
+    workspaceWasDefaultedRef.current = candidate === userDir && recent[0] == null;
     setWorkspace((cur) => (cur === "" ? candidate : cur));
   }, [selectedHostId, recent, derivedHome, currentUserId, prefillSettled, sandboxSelected]);
 
@@ -2358,6 +2368,15 @@ export function NewChatLandingScreen() {
     harnessWarningHost,
   );
   const workspaceTrimmed = workspace.trim();
+  // Explicit user picks clear the auto-defaulted flag so handleCreate
+  // skips the ensure-directory step for paths the user chose themselves.
+  const setWorkspaceExplicit = useCallback(
+    (path: string) => {
+      workspaceWasDefaultedRef.current = false;
+      setWorkspace(path);
+    },
+    [setWorkspace],
+  );
   const workspaceValid = isValidWorkspace(workspace);
   const isCloudHost =
     sandboxSelected || (selectedHost?.name?.toLowerCase().includes("cloud") ?? false);
@@ -2827,6 +2846,20 @@ export function NewChatLandingScreen() {
     setCreating(true);
     setCreateError(null);
     try {
+      // Ensure the auto-seeded default directory exists on the host before
+      // creating the session. Only fires for the defaultUserWorkspace path —
+      // recent, explicit, and managed-sandbox workspaces are left alone.
+      // 409 (already exists) is success; real errors (permission, timeout)
+      // block session creation so the user sees why.
+      if (!sandboxSelected && selectedHostId && workspaceWasDefaultedRef.current) {
+        try {
+          await createHostDirectory(selectedHostId, workspaceTrimmed);
+        } catch (dirErr: unknown) {
+          if (!(dirErr instanceof Error && "status" in dirErr && (dirErr as { status: number }).status === 409)) {
+            throw dirErr;
+          }
+        }
+      }
       const trimmedBranch = branchName.trim();
       // `shouldCreateWorktree` (component scope): true only when a branch is
       // named and the workspace isn't already an existing worktree. Starting
@@ -3000,8 +3033,12 @@ export function NewChatLandingScreen() {
       submittedRef.current = true;
       landingDraft = null;
       navigate(`/c/${data.id}`);
-    } catch {
-      setCreateError("Couldn't reach the server. Check your connection and try again.");
+    } catch (err) {
+      setCreateError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Couldn't reach the server. Check your connection and try again.",
+      );
     } finally {
       setCreating(false);
     }
@@ -3719,7 +3756,7 @@ export function NewChatLandingScreen() {
                         initialPath={
                           isNavigablePath(workspaceTrimmed) ? workspaceTrimmed : undefined
                         }
-                        onNavigate={setWorkspace}
+                        onNavigate={setWorkspaceExplicit}
                         // Warn when browsing into a directory other live agents
                         // occupy. Suppressed only when a NEW isolated worktree
                         // will be created (no shared-dir conflict then). When
@@ -3853,7 +3890,7 @@ export function NewChatLandingScreen() {
                                       // though blur is about to hide the list.
                                       onMouseDown={(e) => {
                                         e.preventDefault();
-                                        setWorkspace(w.path);
+                                        setWorkspaceExplicit(w.path);
                                         setBranchInputFocused(false);
                                         setWorktreePopoverOpen(false);
                                       }}
