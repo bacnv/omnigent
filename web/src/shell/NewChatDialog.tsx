@@ -1616,6 +1616,7 @@ type LandingDraft = {
   sandboxRepoUrl: string;
   sandboxRepoBranch: string;
   workspace: string;
+  workspaceWasDefaulted: boolean;
   branchName: string;
   prefilledBranch: string;
   permissionMode: string;
@@ -1825,6 +1826,8 @@ export function NewChatLandingScreen() {
     () => landingDraft?.sandboxRepoBranch ?? "",
   );
   const [workspace, setWorkspace] = useState<string>(() => landingDraft?.workspace ?? "");
+  // Preserve generated-path provenance when the in-memory landing draft remounts.
+  const workspaceWasDefaultedRef = useRef(landingDraft?.workspaceWasDefaulted ?? false);
   const [branchName, setBranchName] = useState<string>(() => landingDraft?.branchName ?? "");
   // The base branch auto-fills from the configured default (Settings › Git)
   // when the user names a worktree branch, and is left alone once the user
@@ -1945,6 +1948,7 @@ export function NewChatLandingScreen() {
     sandboxRepoUrl,
     sandboxRepoBranch,
     workspace,
+    workspaceWasDefaulted: workspaceWasDefaultedRef.current,
     branchName,
     prefilledBranch,
     permissionMode,
@@ -2048,10 +2052,6 @@ export function NewChatLandingScreen() {
   // Host whose workspace was already seeded once, so a host re-pick doesn't
   // clobber the field (used by the per-host seeding effect below).
   const seededHostRef = useRef<string | null>(null);
-  // True when the seeded workspace came from defaultUserWorkspace() — the path
-  // may not exist yet, so handleCreate ensures the directory before creating
-  // the session. Cleared when the user picks a workspace explicitly.
-  const workspaceWasDefaultedRef = useRef(false);
   // Workspace the opt-in worktree effect already acted on, so it fires at most
   // once per settled workspace (and can't loop once it sets a branch name).
   const worktreeSeededForRef = useRef<string | null>(null);
@@ -2855,13 +2855,15 @@ export function NewChatLandingScreen() {
       // Ensure the auto-seeded default directory exists on the host before
       // creating the session. Only fires for the defaultUserWorkspace path —
       // recent, explicit, and managed-sandbox workspaces are left alone.
-      // 409 (already exists) is success; real errors (permission, timeout)
+      // An existing directory is success; real errors (permission, timeout)
       // block session creation so the user sees why.
       if (!sandboxSelected && selectedHostId && workspaceWasDefaultedRef.current) {
         try {
           await createHostDirectory(selectedHostId, workspaceTrimmed);
         } catch (dirErr: unknown) {
-          if (!(dirErr instanceof Error && "status" in dirErr && (dirErr as { status: number }).status === 409)) {
+          // The endpoint uses 409 for expected filesystem errors; only an
+          // existing directory means the workspace is ready to use.
+          if (!(dirErr instanceof Error && dirErr.message === "directory already exists")) {
             throw dirErr;
           }
         }

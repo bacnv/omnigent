@@ -1401,6 +1401,40 @@ describe("NewChatLandingScreen create flow", () => {
     expect(navigateMock).toHaveBeenCalledWith("/c/conv_new");
   });
 
+  it("creates a restored generated default directory before creating the session", async () => {
+    localStorage.removeItem(RECENT_KEY);
+    mockCurrentUserId = "root";
+    mockHomeListing = {
+      entries: [
+        {
+          name: "projects",
+          path: "/home/claude/projects",
+          type: "directory",
+          bytes: null,
+          modified_at: 0,
+        },
+      ],
+      truncated: false,
+    };
+
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("root"),
+    );
+    cleanup();
+
+    vi.mocked(authenticatedFetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    renderLanding();
+    typeMessage("go");
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(1));
+    expect(createHostDirectoryMock).toHaveBeenCalledWith("host_1", "/home/claude/root");
+  });
+
   it("does not create a directory for an explicit workspace", async () => {
     // Recent is set (the default beforeEach seeds it), so the workspace comes
     // from recents, not defaultUserWorkspace — no directory-create call.
@@ -1426,7 +1460,7 @@ describe("NewChatLandingScreen create flow", () => {
       entries: [{ name: "projects", path: "/home/claude/projects", type: "directory", bytes: null, modified_at: 0 }],
       truncated: false,
     };
-    const permErr = Object.assign(new Error("permission denied"), { status: 403 });
+    const permErr = Object.assign(new Error("permission denied"), { status: 409 });
     createHostDirectoryMock.mockRejectedValueOnce(permErr);
 
     renderLanding();
