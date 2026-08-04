@@ -618,6 +618,120 @@ def test_list_hosts_empty_for_unknown_owner(
     assert result == []
 
 
+def test_list_hosts_for_owners_unions_multiple_owners(
+    host_store: HostStore,
+) -> None:
+    """
+    Verify list_hosts_for_owners returns hosts across all given owners.
+
+    If it only returns one owner's hosts, the IN-clause is broken or
+    missing.
+    """
+    host_store.upsert_on_connect(
+        "dd631c2a902eeead6632bb7a15d2a36d", "alice-laptop", "alice@example.com"
+    )
+    host_store.upsert_on_connect(
+        "af2aefbe4a416df7641bf8ca520f838f", "bob-laptop", "bob@example.com"
+    )
+    host_store.upsert_on_connect(
+        "58d8ac102d1d1b3db3f5056a7c8e196b", "carol-laptop", "carol@example.com"
+    )
+
+    result = host_store.list_hosts_for_owners(["alice@example.com", "bob@example.com"])
+
+    host_ids = {h.host_id for h in result}
+    assert host_ids == {
+        "dd631c2a902eeead6632bb7a15d2a36d",
+        "af2aefbe4a416df7641bf8ca520f838f",
+    }
+
+
+def test_list_hosts_for_owners_excludes_other_owners(
+    host_store: HostStore,
+) -> None:
+    """Hosts owned by users outside the owners list must not appear."""
+    host_store.upsert_on_connect(
+        "dd631c2a902eeead6632bb7a15d2a36d", "alice-laptop", "alice@example.com"
+    )
+    host_store.upsert_on_connect(
+        "af2aefbe4a416df7641bf8ca520f838f", "bob-laptop", "bob@example.com"
+    )
+
+    result = host_store.list_hosts_for_owners(["alice@example.com"])
+
+    assert [h.host_id for h in result] == ["dd631c2a902eeead6632bb7a15d2a36d"]
+
+
+def test_list_hosts_for_owners_dedupes_when_same_owner_repeated(
+    host_store: HostStore,
+) -> None:
+    """
+    Verify passing the same owner twice doesn't duplicate its hosts.
+
+    Covers the caller-is-also-admin case in the /v1/hosts route, where
+    the owners set may still contain a duplicate before de-duplication.
+    """
+    host_store.upsert_on_connect(
+        "dd631c2a902eeead6632bb7a15d2a36d", "alice-laptop", "alice@example.com"
+    )
+
+    result = host_store.list_hosts_for_owners(["alice@example.com", "alice@example.com"])
+
+    assert [h.host_id for h in result] == ["dd631c2a902eeead6632bb7a15d2a36d"]
+
+
+def test_list_hosts_for_owners_empty_input_returns_empty(
+    host_store: HostStore,
+) -> None:
+    """
+    Verify an empty owners list returns an empty result without
+    touching the database.
+    """
+    assert host_store.list_hosts_for_owners([]) == []
+
+
+def test_list_hosts_for_owners_orders_by_updated_at_desc(
+    host_store: HostStore,
+    db_uri: str,
+) -> None:
+    """Union results keep the same updated_at DESC ordering as list_hosts."""
+    host_store.upsert_on_connect(
+        "dd631c2a902eeead6632bb7a15d2a36d", "alice-old", "alice@example.com"
+    )
+    host_store.upsert_on_connect("af2aefbe4a416df7641bf8ca520f838f", "bob-new", "bob@example.com")
+    # Make alice's host older so bob sorts first.
+    _set_updated_at(db_uri, "dd631c2a902eeead6632bb7a15d2a36d", now_epoch() - 100)
+
+    result = host_store.list_hosts_for_owners(["alice@example.com", "bob@example.com"])
+
+    assert [h.host_id for h in result] == [
+        "af2aefbe4a416df7641bf8ca520f838f",
+        "dd631c2a902eeead6632bb7a15d2a36d",
+    ]
+
+
+def test_list_hosts_for_owners_is_workspace_scoped(
+    host_store: HostStore,
+) -> None:
+    """Hosts from another workspace must not leak into the owners union."""
+    from omnigent.db.db_models import workspace_scope
+
+    with workspace_scope(1):
+        host_store.upsert_on_connect(
+            "aa111111111111111111111111111111", "ws1-laptop", "alice@example.com"
+        )
+    with workspace_scope(2):
+        host_store.upsert_on_connect(
+            "bb222222222222222222222222222222", "ws2-laptop", "alice@example.com"
+        )
+        result = host_store.list_hosts_for_owners(["alice@example.com"])
+        assert [h.host_id for h in result] == ["bb222222222222222222222222222222"]
+
+    with workspace_scope(1):
+        result = host_store.list_hosts_for_owners(["alice@example.com"])
+        assert [h.host_id for h in result] == ["aa111111111111111111111111111111"]
+
+
 def test_get_host_returns_none_for_unknown(
     host_store: HostStore,
 ) -> None:
