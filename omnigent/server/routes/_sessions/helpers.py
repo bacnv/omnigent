@@ -5669,6 +5669,7 @@ async def _validate_session_workspace(
     agent: Any,
     agent_cache: AgentCache | None,
     request: Request,
+    permission_store: PermissionStore | None = None,
 ) -> str:
     """
     Validate a session's workspace against the agent's os_env boundary.
@@ -5714,6 +5715,7 @@ async def _validate_session_workspace(
         agent_cache=agent_cache,
         host_store=getattr(request.app.state, "host_store", None),
         host_registry=getattr(request.app.state, "host_registry", None),
+        permission_store=permission_store,
     )
 
 

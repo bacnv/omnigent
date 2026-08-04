@@ -1018,6 +1018,7 @@ async def _validate_fire_session_inputs(
                 agent_cache=deps.agent_cache,
                 host_store=deps.host_store,
                 host_registry=deps.host_registry,
+                permission_store=deps.permission_store,
             )
     except OmnigentError as exc:
         return exc.message, exc.code
@@ -1059,16 +1060,26 @@ async def _authorize_pinned_host(deps: FireDeps, task: ScheduledTask, host_id: s
             f"connected host {host_id!r} was not found",
             error_code="host_not_found",
         )
-    if task.user_id is not None and host.user_id != task.user_id:
-        raise _CannotLaunchScheduledFire(
-            f"connected host {host_id!r} is not owned by the scheduled task owner",
-            error_code="host_not_owned",
-        )
-    if task.user_id is not None and host.account_generation != task.account_generation:
-        raise _CannotLaunchScheduledFire(
-            f"connected host {host_id!r} belongs to a different account registration",
-            error_code="host_authority_revoked",
-        )
+    if task.user_id is not None:
+        if host.user_id != task.user_id:
+            # An admin-owned host is usable by any task owner; ``is_admin``
+            # already answers False for a deleted row, so a revoked admin
+            # falls through to host_not_owned rather than being reachable.
+            admin_ok = deps.permission_store is not None and await asyncio.to_thread(
+                deps.permission_store.is_admin, host.user_id
+            )
+            if not admin_ok:
+                raise _CannotLaunchScheduledFire(
+                    f"connected host {host_id!r} is not owned by the scheduled task owner",
+                    error_code="host_not_owned",
+                )
+        elif host.account_generation != task.account_generation:
+            # Same owner: a generation mismatch means that account was deleted
+            # and re-registered, leaving this host bound to the prior one.
+            raise _CannotLaunchScheduledFire(
+                f"connected host {host_id!r} belongs to a different account registration",
+                error_code="host_authority_revoked",
+            )
     if host.sandbox_provider is not None:
         raise _CannotLaunchScheduledFire(
             "automations cannot use an existing sandbox; select a new sandbox for each run",

@@ -287,6 +287,7 @@ async def _authorize_host_for_workspace(
     host_id: str,
     host_store: Any | None,
     host_registry: Any,
+    permission_store: PermissionStore | None = None,
 ) -> str | None:
     """
     Authorize host ownership and classify a wrong-replica landing.
@@ -315,6 +316,7 @@ async def _authorize_host_for_workspace(
         user_id=user_id,
         host_id=host_id,
         host_store=host_store,
+        permission_store=permission_store,
     )
     # Wrong-replica classification, same as the /v1/hosts/* endpoints and
     # RunnerRouter: validate_workspace does a local host_registry miss
@@ -372,6 +374,7 @@ async def validate_existing_host_workspace(
     agent_cache: AgentCache | None,
     host_store: Any | None,
     host_registry: Any | None,
+    permission_store: PermissionStore | None = None,
 ) -> str:
     """Validate a connected-host workspace against the agent's os_env boundary."""
     workspace = _require_absolute_host_workspace(workspace)
@@ -394,6 +397,7 @@ async def validate_existing_host_workspace(
         host_id=host_id,
         host_store=host_store,
         host_registry=host_registry,
+        permission_store=permission_store,
     )
 
     # Read the agent's os_env.cwd — None when the spec has no os_env block
@@ -434,6 +438,7 @@ async def validate_uploaded_bundle_host_workspace(
     spec_cwd: str | None,
     host_store: Any | None,
     host_registry: Any | None,
+    permission_store: PermissionStore | None = None,
 ) -> str:
     """
     Validate a connected-host workspace for a bundle-upload create.
@@ -470,6 +475,7 @@ async def validate_uploaded_bundle_host_workspace(
         host_id=host_id,
         host_store=host_store,
         host_registry=host_registry,
+        permission_store=permission_store,
     )
     return await _canonical_workspace_or_invalid_input(
         host_registry=host_registry,
