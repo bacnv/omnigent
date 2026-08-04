@@ -306,9 +306,11 @@ class HostStore:
             Written on every connect — including ``None`` from an older
             host that doesn't report it, which correctly resets any
             stale value back to "unknown".
-        :param managed_token: Raw launch token for a managed host. When set,
-            registration atomically revalidates the current credential instead
-            of performing the external-host upsert path.
+        :param managed_token: Raw launch token presented by the peer. When
+            set, registration atomically revalidates the current credential
+            instead of performing the external-host upsert path. Managed hosts
+            additionally require an active sandbox generation; external hosts
+            (no ``sandbox_provider``) revalidate on the credential alone.
         :returns: The upserted :class:`Host`.
         """
         now = now_epoch()
@@ -330,7 +332,16 @@ class HostStore:
                             SqlHost.token_hash == hash_host_launch_token(managed_token),
                             SqlHost.token_expires_at.is_not(None),
                             SqlHost.token_expires_at >= now,
-                            SqlHost.sandbox_id.is_not(None),
+                            # A managed host must still hold its active
+                            # generation: a row detached from its sandbox is
+                            # mid-cleanup and must not re-register. An external
+                            # host (never provisioned by a provider) has no
+                            # sandbox to require, so gate on the provider
+                            # instead of the sandbox id.
+                            or_(
+                                SqlHost.sandbox_provider.is_(None),
+                                SqlHost.sandbox_id.is_not(None),
+                            ),
                             SqlHost.deleted_at.is_(None),
                         )
                         .values(
@@ -766,6 +777,23 @@ class HostStore:
                 .filter(
                     SqlHost.workspace_id == current_workspace_id(),
                     SqlHost.user_id == user_id,
+                    SqlHost.deleted_at.is_(None),
+                )
+                .order_by(SqlHost.updated_at.desc())
+                .all()
+            )
+            return [_row_to_host(row) for row in rows]
+
+    def list_hosts_for_owners(self, owners: list[str]) -> list[Host]:
+        """List hosts owned by any given user, newest first."""
+        if not owners:
+            return []
+        with self._session("list_hosts_for_owners") as session:
+            rows = (
+                session.query(SqlHost)
+                .filter(
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.user_id.in_(set(owners)),
                     SqlHost.deleted_at.is_(None),
                 )
                 .order_by(SqlHost.updated_at.desc())
