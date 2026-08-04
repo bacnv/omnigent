@@ -7858,6 +7858,7 @@ async def _create_session_from_existing_agent(
             agent=agent,
             agent_cache=agent_cache,
             request=request,
+            permission_store=permission_store,
         )
 
     # Git worktree options (optional). Two modes on body.git:
