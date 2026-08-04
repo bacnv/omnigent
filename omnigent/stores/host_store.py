@@ -701,6 +701,23 @@ class HostStore:
             )
             return [_row_to_host(row) for row in rows]
 
+    def list_hosts_for_owners(self, owners: list[str]) -> list[Host]:
+        """List hosts owned by any given user, newest first."""
+        if not owners:
+            return []
+        with self._session("list_hosts_for_owners") as session:
+            rows = (
+                session.query(SqlHost)
+                .filter(
+                    SqlHost.workspace_id == current_workspace_id(),
+                    SqlHost.user_id.in_(set(owners)),
+                    SqlHost.deleted_at.is_(None),
+                )
+                .order_by(SqlHost.updated_at.desc())
+                .all()
+            )
+            return [_row_to_host(row) for row in rows]
+
     def list_managed_sandbox_workspace_ids(self) -> list[int]:
         """List workspaces with active or pending managed sandbox generations.
 
