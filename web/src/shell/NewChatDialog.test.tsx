@@ -10,6 +10,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import {
   composeSandboxWorkspace,
+  defaultUserWorkspace,
   deriveHomeDir,
   deriveRepoName,
   describeCreateError,
@@ -26,7 +27,7 @@ import {
 } from "./NewChatDialog";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
-import { authenticatedFetch } from "@/lib/identity";
+import { authenticatedFetch, getCurrentUserId, resolveIdentity } from "@/lib/identity";
 import {
   useHostModelOptions,
   useHosts,
@@ -50,6 +51,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 vi.mock("@/lib/identity", async (importOriginal) => ({
   ...(await importOriginal<typeof IdentityModule>()),
   authenticatedFetch: vi.fn(),
+  getCurrentUserId: vi.fn(() => null),
+  resolveIdentity: vi.fn(() => Promise.resolve(null)),
 }));
 vi.mock("@/hooks/useHosts", () => ({
   useHosts: vi.fn(),
@@ -141,6 +144,8 @@ vi.mock("@/store/chatStore", async (importOriginal) => ({
 }));
 
 const authenticatedFetchMock = vi.mocked(authenticatedFetch);
+const getCurrentUserIdMock = vi.mocked(getCurrentUserId);
+const resolveIdentityMock = vi.mocked(resolveIdentity);
 const useHostsMock = vi.mocked(useHosts);
 const useHostModelOptionsMock = vi.mocked(useHostModelOptions);
 const useAvailableAgentsMock = vi.mocked(useAvailableAgents);
@@ -447,6 +452,35 @@ describe("deriveHomeDir", () => {
   });
 });
 
+describe("defaultUserWorkspace", () => {
+  it.each([
+    ["/home/claude", "bacnv", "/home/claude/bacnv"],
+    ["/root", "bacnv", "/root/bacnv"],
+    ["/", "bacnv", "/bacnv"],
+  ])("builds the default workspace", (home, username, expected) => {
+    expect(defaultUserWorkspace(home, username)).toBe(expected);
+  });
+
+  it.each([
+    "",
+    ".",
+    "..",
+    "../escape",
+    "/absolute",
+    "a/b",
+    "a\\b",
+    " alice ",
+    "Alice",
+    "bac.nv",
+    "bac@nv",
+  ])("rejects unsafe username %s", (username) =>
+    expect(defaultUserWorkspace("/home/claude", username)).toBeNull(),
+  );
+  it.each(["", " ", "  "])("returns null for blank home %j", (home) =>
+    expect(defaultUserWorkspace(home, "bacnv")).toBeNull(),
+  );
+});
+
 // A failed POST /v1/sessions must surface a reason, not silently
 // reset the button. These pin the message the screen shows.
 describe("describeCreateError", () => {
@@ -611,6 +645,10 @@ function mockAgents(agents: AvailableAgent[]) {
 // recent workspace so the working-directory field seeds to a known path.
 function setupLandingMocks() {
   authenticatedFetchMock.mockReset();
+  getCurrentUserIdMock.mockReset();
+  getCurrentUserIdMock.mockReturnValue(null);
+  resolveIdentityMock.mockReset();
+  resolveIdentityMock.mockResolvedValue(null);
   useHostsMock.mockReset();
   useHostModelOptionsMock.mockReset();
   useAvailableAgentsMock.mockReset();
@@ -1012,9 +1050,64 @@ describe("NewChatLandingScreen", () => {
     );
   });
 
+  it("defaults a fresh external session to Claude native, Sonnet, and high effort", async () => {
+    localStorage.clear();
+    mockAgents([
+      {
+        id: "a_codex",
+        name: "codex-native-ui",
+        display_name: "Codex",
+        description: null,
+        harness: "codex-native",
+        skills: [],
+      },
+      {
+        id: "a_claude",
+        name: "claude-native-ui",
+        display_name: "Claude Code",
+        description: null,
+        harness: "claude-native",
+        skills: [],
+      },
+    ]);
+    renderLanding();
+    await waitFor(() => expect(screen.getByTestId("new-chat-landing-config-gear")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("new-chat-landing-config-gear"));
+    expect(screen.getByTestId("new-chat-landing-config-model").textContent).toContain("Sonnet 4.6");
+    expect(screen.getByTestId("new-chat-landing-config-effort").textContent).toContain("High");
+  });
+
+  it("seeds /home/claude/bacnv after home and identity resolve", async () => {
+    localStorage.clear();
+    getCurrentUserIdMock.mockReturnValue("bacnv");
+    useHostFilesystemMock.mockReturnValue({
+      data: { entries: [fsEntry("/home/claude/projects")], truncated: false },
+      isLoading: false,
+      error: null,
+      isPlaceholderData: false,
+    } as unknown as ReturnType<typeof useHostFilesystem>);
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("bacnv"),
+    );
+  });
+
+  it("does not overwrite a recent workspace", async () => {
+    getCurrentUserIdMock.mockReturnValue("bacnv");
+    useHostFilesystemMock.mockReturnValue({
+      data: { entries: [fsEntry("/home/claude/projects")], truncated: false },
+      isLoading: false,
+      error: null,
+      isPlaceholderData: false,
+    } as unknown as ReturnType<typeof useHostFilesystem>);
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("repo"),
+    );
+  });
+
   it("falls back to the host's home directory when there is no recent", async () => {
-    // No recents for this host → the field seeds from the home listing
-    // (parent of the first entry), so a first-ever session is still one click.
+    // No identity means the existing home fallback remains available.
     localStorage.clear();
     useHostFilesystemMock.mockReturnValue({
       data: { entries: [fsEntry("/home/corey/projects")], truncated: false },
@@ -1023,7 +1116,6 @@ describe("NewChatLandingScreen", () => {
       isPlaceholderData: false,
     } as unknown as ReturnType<typeof useHostFilesystem>);
     renderLanding();
-    // deriveHomeDir("/home/corey/projects") → "/home/corey" → chip basename.
     await waitFor(() =>
       expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("corey"),
     );
@@ -1063,7 +1155,7 @@ describe("NewChatLandingScreen", () => {
     // Opus 4.8 / Sonnet 4.6 / Haiku 4.5) — never the removed/static rows.
     openSelect("new-chat-landing-config-model");
     expect(screen.getByText("Opus 4.8")).toBeTruthy();
-    expect(screen.getByText("Sonnet 4.6")).toBeTruthy();
+    expect(screen.getAllByText("Sonnet 4.6").length).toBeGreaterThan(0);
     expect(screen.queryByText("Fable")).toBeNull();
     expect(screen.queryByText("Sonnet 5")).toBeNull();
     closeMenu();
@@ -1099,9 +1191,9 @@ describe("NewChatLandingScreen", () => {
     saveConfig();
 
     // The Codex model is remembered under codex-native only; Claude Code's
-    // picker should reopen on its own Default instead of inheriting the GPT id.
+    // picker should reopen on its own Sonnet default instead of inheriting the GPT id.
     openAgentConfig("a1");
-    expect(screen.getByTestId("new-chat-landing-config-model").textContent).toContain("Default");
+    expect(screen.getByTestId("new-chat-landing-config-model").textContent).toContain("Sonnet 4.6");
     expect(screen.getByTestId("new-chat-landing-config-model").textContent).not.toContain(
       "databricks-gpt-5-6",
     );
@@ -2611,8 +2703,7 @@ describe("NewChatLandingScreen agent picker + config gear", () => {
     expect(tooltip.textContent).toContain("Permissions:");
     expect(tooltip.textContent).toContain("Plan");
     expect(tooltip.textContent).toContain("Model:");
-    // Unset effort reads "Default" (mirrors the modal), never the "—" sentinel.
-    expect(tooltip.textContent).toContain("Effort: Default");
+    expect(tooltip.textContent).toContain("Effort: High");
     expect(tooltip.textContent).not.toContain("—");
   });
 
