@@ -729,6 +729,38 @@ async def test_list_hosts_filters_by_owner(
         )
 
 
+async def test_list_hosts_includes_admin_owned_hosts(
+    multi_user_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """
+    GET /v1/hosts returns the caller's own hosts plus every admin's
+    hosts, with no duplicate when the caller is themselves an admin.
+    """
+    app, _reg, host_store, _cs = multi_user_app
+    host_store.upsert_on_connect("a1b2c3d4e5f60718293a4b5c6d7e8f90", "bob-laptop", "bob@test.com")
+    host_store.upsert_on_connect(
+        "b2c3d4e5f60718293a4b5c6d7e8f901a", "admin-laptop", "admin@test.com"
+    )
+    app.state.permission_store.ensure_user("admin@test.com")
+    app.state.permission_store.set_admin("admin@test.com", True)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/v1/hosts", headers={"x-test-user": "bob@test.com"})
+        assert resp.status_code == 200
+        host_ids = {h["host_id"] for h in resp.json()["hosts"]}
+        assert host_ids == {
+            "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            "b2c3d4e5f60718293a4b5c6d7e8f901a",
+        }, f"Bob should see own + admin hosts, got {host_ids}."
+
+        resp = await client.get("/v1/hosts", headers={"x-test-user": "admin@test.com"})
+        assert resp.status_code == 200
+        admin_hosts = resp.json()["hosts"]
+        assert [h["host_id"] for h in admin_hosts] == ["b2c3d4e5f60718293a4b5c6d7e8f901a"], (
+            f"Admin listing must not duplicate own host, got {admin_hosts}."
+        )
+
+
 async def test_get_host_403_wrong_owner(
     multi_user_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
 ) -> None:
@@ -753,6 +785,28 @@ async def test_get_host_403_wrong_owner(
         f"Expected 403 for wrong owner, got {resp.status_code}. "
         "Owner check on GET /v1/hosts/{{id}} is missing."
     )
+
+
+async def test_get_host_admin_owned_allowed_for_other_user(
+    multi_user_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """A regular user can GET an admin-owned host's details."""
+    app, _reg, host_store, _cs = multi_user_app
+    host_store.upsert_on_connect(
+        "c3d4e5f60718293a4b5c6d7e8f901a2b", "admin-laptop", "admin@test.com"
+    )
+    app.state.permission_store.ensure_user("admin@test.com")
+    app.state.permission_store.set_admin("admin@test.com", True)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(
+            "/v1/hosts/c3d4e5f60718293a4b5c6d7e8f901a2b",
+            headers={"x-test-user": "bob@test.com"},
+        )
+    assert resp.status_code == 200, (
+        f"Expected 200 for admin-owned host, got {resp.status_code}: {resp.text}"
+    )
+    assert resp.json()["owner"] == "admin@test.com"
 
 
 async def test_launch_runner_403_wrong_owner(
@@ -795,6 +849,74 @@ async def test_launch_runner_403_wrong_owner(
     assert resp.status_code == 403, (
         f"Expected 403 for wrong owner on launch, got {resp.status_code}. "
         "Owner check on POST /v1/hosts/{{id}}/runners is missing."
+    )
+
+
+async def test_launch_runner_admin_owned_allowed_for_other_user(
+    multi_user_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """A regular user can launch a runner on an admin-owned host."""
+    app, registry, host_store, conv_store = multi_user_app
+    host_store.upsert_on_connect(
+        "d4e5f60718293a4b5c6d7e8f901a2b3c", "admin-laptop", "admin@test.com"
+    )
+    app.state.permission_store.ensure_user("admin@test.com")
+    app.state.permission_store.set_admin("admin@test.com", True)
+    from omnigent.host.frames import HostHelloFrame
+
+    registry.register(
+        "d4e5f60718293a4b5c6d7e8f901a2b3c",
+        type(
+            "FakeWS",
+            (),
+            {"send_text": lambda self, d: None, "receive_text": lambda self: ""},
+        )(),
+        HostHelloFrame(version="0.1.0", frame_protocol_version=1, name="admin-laptop"),
+        owner="admin@test.com",
+    )
+    from omnigent.server.auth import LEVEL_OWNER
+
+    conv = conv_store.create_conversation(agent_id=None)
+    app.state.permission_store.ensure_user("bob@test.com")
+    app.state.permission_store.grant("bob@test.com", conv.id, LEVEL_OWNER)
+
+    async def _respond_to_launch() -> None:
+        from omnigent.host.frames import HostLaunchRunnerFrame, decode_host_frame
+
+        conn = registry.get("d4e5f60718293a4b5c6d7e8f901a2b3c")
+        assert conn is not None
+        for _ in range(20):
+            data = await conn.outbound_queue.get()
+            if data is None:
+                continue
+            frame = decode_host_frame(data)
+            if isinstance(frame, HostLaunchRunnerFrame):
+                future = conn.pending_launches.get(frame.request_id)
+                if future is not None and not future.done():
+                    future.set_result(
+                        {
+                            "status": "launched",
+                            "runner_id": "runner_token_admin",
+                            "error": None,
+                            "error_code": None,
+                        }
+                    )
+                return
+        raise AssertionError("Host never received launch frame")
+
+    responder = asyncio.create_task(_respond_to_launch())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/v1/hosts/d4e5f60718293a4b5c6d7e8f901a2b3c/runners",
+            json={"session_id": conv.id, "workspace": "/tmp"},
+            headers={"x-test-user": "bob@test.com"},
+        )
+
+    await responder
+
+    assert resp.status_code == 200, (
+        f"Expected 200 for admin-owned host launch, got {resp.status_code}: {resp.text}"
     )
 
 
