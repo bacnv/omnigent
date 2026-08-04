@@ -54,6 +54,20 @@ class _FakeConversationStore:
         return self.convs.get(conversation_id)
 
 
+@dataclass
+class _FakePermissionStore:
+    admins: set[str] = field(default_factory=set)
+    owners: set[str] = field(default_factory=set)
+
+    def is_admin(self, user_id: str) -> bool:
+        return user_id in self.admins
+
+    def get(self, user_id: str, conversation_id: str) -> object | None:
+        if user_id in self.owners:
+            return object()
+        return None
+
+
 # ── resolve_host_owner ───────────────────────────────────────────────
 
 
@@ -82,6 +96,43 @@ class TestResolveHostOwner:
         store = _FakeHostStore(hosts={"host_1": host})
         result = resolve_host_owner(user_id=None, host_id="host_1", host_store=store)
         assert result.host_id == "host_1"
+
+    def test_admin_owned_host_allowed_for_other_user(self) -> None:
+        host = _FakeHost(host_id="host_1", user_id="admin@example.com")
+        store = _FakeHostStore(hosts={"host_1": host})
+        perms = _FakePermissionStore(admins={"admin@example.com"})
+        result = resolve_host_owner(
+            user_id="alice",
+            host_id="host_1",
+            host_store=store,
+            permission_store=perms,
+        )
+        assert result.host_id == "host_1"
+
+    def test_non_admin_owned_host_still_403_with_permission_store(self) -> None:
+        host = _FakeHost(host_id="host_1", user_id="bob")
+        store = _FakeHostStore(hosts={"host_1": host})
+        perms = _FakePermissionStore(admins={"admin@example.com"})
+        with pytest.raises(HTTPException) as exc_info:
+            resolve_host_owner(
+                user_id="alice",
+                host_id="host_1",
+                host_store=store,
+                permission_store=perms,
+            )
+        assert exc_info.value.status_code == 403
+
+    def test_missing_permission_store_keeps_strict_ownership(self) -> None:
+        host = _FakeHost(host_id="host_1", user_id="admin@example.com")
+        store = _FakeHostStore(hosts={"host_1": host})
+        with pytest.raises(HTTPException) as exc_info:
+            resolve_host_owner(
+                user_id="alice",
+                host_id="host_1",
+                host_store=store,
+                permission_store=None,
+            )
+        assert exc_info.value.status_code == 403
 
 
 # ── resolve_host_launch ──────────────────────────────────────────────
@@ -148,6 +199,76 @@ class TestResolveHostLaunch:
         assert result.host.host_id == "host_1"
         assert result.conv.id == "s1"
 
+    def test_admin_owned_host_launch_allowed_when_session_owned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        host = _FakeHost(host_id="host_1", user_id="admin@example.com")
+        conn = object()
+        conv = Conversation(
+            id="s1",
+            created_at=1,
+            updated_at=1,
+            root_conversation_id="s1",
+            agent_id="ag_1",
+        )
+        store = _FakeHostStore(hosts={"host_1": host})
+        registry = _FakeHostRegistry(conns={"host_1": conn})
+        conv_store = _FakeConversationStore(convs={"s1": conv})
+        perms = _FakePermissionStore(admins={"admin@example.com"}, owners={"alice"})
+
+        monkeypatch.setattr(
+            "omnigent.server.routes._host_launch.check_session_access",
+            lambda user_id, session_id, level, permission_store, conversation_store: (
+                user_id == "alice" and session_id == "s1"
+            ),
+        )
+
+        result = resolve_host_launch(
+            user_id="alice",
+            host_id="host_1",
+            session_id="s1",
+            host_store=store,
+            host_registry=registry,
+            conversation_store=conv_store,
+            permission_store=perms,
+        )
+        assert result.host.host_id == "host_1"
+        assert result.conv.id == "s1"
+
+    def test_session_owner_enforcement_unchanged_on_admin_host(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        host = _FakeHost(host_id="host_1", user_id="admin@example.com")
+        conn = object()
+        conv = Conversation(
+            id="s1",
+            created_at=1,
+            updated_at=1,
+            root_conversation_id="s1",
+            agent_id="ag_1",
+        )
+        store = _FakeHostStore(hosts={"host_1": host})
+        registry = _FakeHostRegistry(conns={"host_1": conn})
+        conv_store = _FakeConversationStore(convs={"s1": conv})
+        perms = _FakePermissionStore(admins={"admin@example.com"})
+
+        monkeypatch.setattr(
+            "omnigent.server.routes._host_launch.check_session_access",
+            lambda *args, **kwargs: False,
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            resolve_host_launch(
+                user_id="alice",
+                host_id="host_1",
+                session_id="s1",
+                host_store=store,
+                host_registry=registry,
+                conversation_store=conv_store,
+                permission_store=perms,
+            )
+        assert exc_info.value.status_code == 404
+
 
 # ── host_absent_error (single-replica vs sharded) ─────────────────────
 
@@ -160,9 +281,7 @@ class TestHostAbsentError:
         assert err.code == ErrorCode.WRONG_REPLICA
 
     def test_single_replica_live_host_is_offline(self) -> None:
-        """On a single-replica deployment there is no other replica to re-address
-        to, so a live-but-absent host is reported offline (409), not the
-        un-satisfiable WRONG_REPLICA that would drive an endless client poll."""
+        """A single-replica deployment has no other replica to re-address to."""
         host = _FakeHost(host_id="host_1", status="online", updated_at=now_epoch())
         err = host_absent_error(host, sharded=False)
         assert err.code == ErrorCode.CONFLICT
