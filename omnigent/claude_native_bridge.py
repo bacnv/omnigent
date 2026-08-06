@@ -1186,6 +1186,23 @@ def read_permission_hook_config(bridge_dir: Path) -> _JsonObject:
     return payload if isinstance(payload, dict) else {}
 
 
+def refresh_permission_hook_auth(bridge_dir: Path, authorization: str) -> bool:
+    """Atomically refresh only the permission hook's bearer header."""
+    path = bridge_dir / _PERMISSION_HOOK_FILE
+    payload = _read_json_file(path)
+    if not isinstance(payload, dict) or not payload.get("ap_server_url"):
+        return False
+    raw_headers = payload.get("ap_auth_headers")
+    headers = dict(raw_headers) if isinstance(raw_headers, dict) else {}
+    if headers.get("Authorization") == authorization:
+        return False
+    headers["Authorization"] = authorization
+    payload["ap_auth_headers"] = headers
+    payload["updated_at"] = time.time()
+    _write_json_file(path, payload)
+    return True
+
+
 def update_permission_hook_auth_headers(
     bridge_dir: Path,
     headers: dict[str, str],

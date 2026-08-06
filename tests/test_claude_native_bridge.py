@@ -44,6 +44,7 @@ from omnigent.claude_native_bridge import (
     read_transcript_items_since,
     read_transcript_path,
     record_hook_event,
+    refresh_permission_hook_auth,
     start_tool_relay,
     stop_hook_seen_since,
     write_tmux_target,
@@ -6647,3 +6648,81 @@ def test_claude_pane_ready_is_true_only_at_an_idle_input_box(
 
 def test_claude_pane_ready_is_false_without_an_advertised_pane(tmp_path: Path) -> None:
     assert claude_native_bridge.claude_pane_ready(tmp_path / "nope") is False
+
+
+def _write_permission_hook(bridge_dir: Path, payload: dict[str, Any]) -> None:
+    """Write a permission_hook.json fixture via the production writer."""
+    claude_native_bridge._write_json_file(
+        bridge_dir / claude_native_bridge._PERMISSION_HOOK_FILE, payload
+    )
+
+
+def test_refresh_permission_hook_auth_updates_only_authorization(
+    tmp_path: Path,
+) -> None:
+    """
+    Refresh rewrites just ``Authorization`` and stamps ``updated_at``.
+
+    A privileged parent mints a fresh delegate bearer every minute and the
+    hook subprocess reads the file on each PermissionRequest call. The
+    server URL and any extra routing headers (e.g. ``X-Omnigent-Trace``)
+    must survive a refresh — a regression that overwrites the whole header
+    block would silently route approvals to the wrong server.
+    """
+    bridge_dir = tmp_path  # autouse fixture trusts tmp_path as bridge root
+    _write_permission_hook(
+        bridge_dir,
+        {
+            "ap_server_url": "http://127.0.0.1:8787",
+            "ap_auth_headers": {
+                "Authorization": "Bearer old-token",
+                "X-Omnigent-Trace": "abc",
+            },
+            "updated_at": 1000.0,
+        },
+    )
+
+    changed = refresh_permission_hook_auth(bridge_dir, "Bearer new-token")
+    assert changed is True
+
+    config = read_permission_hook_config(bridge_dir)
+    assert config["ap_server_url"] == "http://127.0.0.1:8787"
+    assert config["ap_auth_headers"]["Authorization"] == "Bearer new-token"
+    # Extra routing headers are preserved, not clobbered by the rewrite.
+    assert config["ap_auth_headers"]["X-Omnigent-Trace"] == "abc"
+    # ``updated_at`` is restamped so observers can detect a refresh happened.
+    assert config["updated_at"] != 1000.0
+
+
+def test_refresh_permission_hook_auth_unchanged_bearer_is_noop(
+    tmp_path: Path,
+) -> None:
+    """Same bearer → no rewrite, returns False (avoids needless fs churn)."""
+    bridge_dir = tmp_path
+    _write_permission_hook(
+        bridge_dir,
+        {
+            "ap_server_url": "http://127.0.0.1:8787",
+            "ap_auth_headers": {"Authorization": "Bearer same"},
+            "updated_at": 1000.0,
+        },
+    )
+
+    assert refresh_permission_hook_auth(bridge_dir, "Bearer same") is False
+    config = read_permission_hook_config(bridge_dir)
+    assert config["updated_at"] == 1000.0, "no-op must not restamp updated_at"
+
+
+def test_refresh_permission_hook_auth_missing_config_is_noop(tmp_path: Path) -> None:
+    """Missing or serverless config → False, no file written."""
+    bridge_dir = tmp_path
+
+    # No permission_hook.json at all.
+    assert refresh_permission_hook_auth(bridge_dir, "Bearer x") is False
+    assert not (bridge_dir / claude_native_bridge._PERMISSION_HOOK_FILE).exists()
+
+    # File present but no ap_server_url — also a no-op (don't mint into a
+    # hook that has nowhere to route).
+    _write_permission_hook(bridge_dir, {"ap_auth_headers": {}})
+    assert refresh_permission_hook_auth(bridge_dir, "Bearer y") is False
+    assert read_permission_hook_config(bridge_dir).get("ap_server_url") is None

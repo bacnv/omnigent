@@ -1345,8 +1345,13 @@ def create_app(
         # Each is spawned in its own session (survives the runner's death), and a
         # host-initiated stop tears the runner down without a per-session DELETE,
         # so without this they orphan as lingering ``codex`` processes.
-        from omnigent.runner.native import teardown_all_codex_native_app_servers
+        from omnigent.runner.native import (
+            teardown_all_claude_native_permission_refreshes,
+            teardown_all_codex_native_app_servers,
+        )
 
+        with contextlib.suppress(Exception):
+            await teardown_all_claude_native_permission_refreshes()
         with contextlib.suppress(Exception):
             await teardown_all_codex_native_app_servers()
         await pm.shutdown()
