@@ -27,6 +27,22 @@ const RECENT_KEY = "omnigent:recent-workspaces";
 const RECENT_WORKSPACE = "/Users/corey/universe/src/foo";
 const REPO = "/Users/corey/projects/alpha";
 
+// Mutable per-test overrides for the generic default-workspace seeding.
+let mockCurrentUserId: string | null = null;
+let mockHomeListing:
+  | {
+      entries: {
+        name: string;
+        path: string;
+        type: string;
+        bytes: number | null;
+        modified_at: number;
+      }[];
+      truncated: boolean;
+    }
+  | undefined;
+const createHostDirectoryMock = vi.fn<(hostId: string, path: string) => Promise<string>>();
+
 // Mutable so a test can simulate clicking another project's pencil (the
 // screen stays mounted; only the param changes).
 let searchParams = new URLSearchParams("project=Alpha");
@@ -39,7 +55,11 @@ vi.mock("@/store/chatStore", () => ({
   setPendingInitialPrompt: vi.fn(),
 }));
 
-vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
+vi.mock("@/lib/identity", () => ({
+  authenticatedFetch: vi.fn(),
+  getCurrentUserId: () => mockCurrentUserId,
+  resolveIdentity: () => Promise.resolve(null),
+}));
 vi.mock("@/hooks/useHosts", () => ({
   useHosts: vi.fn(),
   useHostModelOptions: vi.fn(() => ({ data: [] })),
@@ -48,8 +68,10 @@ vi.mock("@/hooks/useHosts", () => ({
 }));
 vi.mock("@/hooks/useAvailableAgents", () => ({ useAvailableAgents: vi.fn() }));
 vi.mock("@/hooks/useHostFilesystem", () => ({
-  useHostFilesystem: () => ({ data: undefined }),
+  useHostFilesystem: () => ({ data: mockHomeListing }),
   useCreateHostDirectory: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  createHostDirectory: (...args: unknown[]) =>
+    createHostDirectoryMock(...(args as [string, string])),
 }));
 vi.mock("@/hooks/useHostWorktrees", () => ({
   useHostWorktrees: vi.fn(),
@@ -149,6 +171,10 @@ async function submitAndReadBody(): Promise<Record<string, unknown>> {
 beforeEach(() => {
   navigateMock.mockReset();
   vi.mocked(authenticatedFetch).mockReset();
+  createHostDirectoryMock.mockReset();
+  createHostDirectoryMock.mockResolvedValue("/home/claude/bacnv");
+  mockCurrentUserId = null;
+  mockHomeListing = undefined;
   searchParams = new URLSearchParams("project=Alpha");
   localStorage.clear();
   // A recent on the host that the generic seeding would use when the config
@@ -269,6 +295,56 @@ describe("NewChatLandingScreen project prefill", () => {
     const body = await submitAndReadBody();
     expect(body.workspace).toBe(BETA_REPO);
     expect(body.agent_id).toBe("ag_other");
+  });
+
+  it("does not create a directory for a project prefill after a generated default was seeded", async () => {
+    // Project Alpha has no configured workspace, so the generic default seeds
+    // /home/claude/bacnv and marks it as defaulted. Switching to project Beta
+    // supplies an explicit workspace; that must reset the defaulted marker so
+    // handleCreate does not call createHostDirectory for Beta's path.
+    const BETA_REPO = "/home/claude/project";
+    localStorage.removeItem(RECENT_KEY);
+    mockCurrentUserId = "bacnv";
+    mockHomeListing = {
+      entries: [
+        {
+          name: "projects",
+          path: "/home/claude/projects",
+          type: "directory",
+          bytes: null,
+          modified_at: 0,
+        },
+      ],
+      truncated: false,
+    };
+    vi.mocked(useProjectConfig).mockImplementation((id) => {
+      const data = id === "proj_beta" ? { host_id: "host_1", workspace: BETA_REPO } : {};
+      return { data, isLoading: false } as ReturnType<typeof useProjectConfig>;
+    });
+    const rerender = renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("bacnv"),
+    );
+
+    searchParams = new URLSearchParams("project=Beta");
+    rerender(<NewChatLandingScreen />);
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain(
+        "project",
+      ),
+    );
+
+    vi.mocked(authenticatedFetch).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ id: "conv_new" }),
+    } as Response);
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "hello" },
+    });
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    await waitFor(() => expect(vi.mocked(authenticatedFetch)).toHaveBeenCalled());
+
+    expect(createHostDirectoryMock).not.toHaveBeenCalled();
   });
 
   it("reseeds the SAME project after its stored defaults change (edited then re-opened)", async () => {
