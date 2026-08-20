@@ -2761,6 +2761,51 @@ async def test_required_terminal_clean_quit_publishes_idle_not_failed(
 
 
 @pytest.mark.asyncio
+async def test_claude_terminal_exit_tears_down_permission_refresh() -> None:
+    """The authoritative claude:main pane exit stops its privileged refresher."""
+    from omnigent.runner import app as runner_app
+    from omnigent.runner.native import orchestration
+    from omnigent.runner.resource_registry import TerminalExitEvent, TerminalLifecycle
+
+    session_id = uuid.uuid4().hex
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    publish_exit = app.state.session_resource_registry._terminal_exit_publisher
+    assert callable(publish_exit)
+    refresh_started = asyncio.Event()
+
+    async def _refresh() -> None:
+        refresh_started.set()
+        await asyncio.Event().wait()
+
+    refresh_task = asyncio.create_task(_refresh())
+    orchestration._register_claude_permission_refresh_task(session_id, refresh_task)
+    await refresh_started.wait()
+    try:
+        publish_exit(
+            TerminalExitEvent(
+                session_id=session_id,
+                terminal_id="terminal_claude_main",
+                terminal_name="claude",
+                session_key="main",
+                lifecycle=TerminalLifecycle.REQUIRED,
+                session_was_idle=True,
+            )
+        )
+        for _ in range(1000):
+            if refresh_task.done():
+                break
+            await asyncio.sleep(0)
+        assert refresh_task.cancelled()
+        assert session_id not in orchestration._AUTO_CLAUDE_PERMISSION_REFRESH_TASKS
+    finally:
+        await orchestration.teardown_claude_native_permission_refresh(session_id)
+        runner_app.unregister_child_session(session_id)
+
+
+@pytest.mark.asyncio
 async def test_external_idle_status_makes_required_terminal_exit_clean(tmp_path: Path) -> None:
     """
     A structured native ``idle`` status prevents a later pane close from failing.

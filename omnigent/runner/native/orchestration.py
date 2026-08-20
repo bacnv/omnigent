@@ -161,6 +161,63 @@ _AUTO_FORWARDER_CANCEL_TIMEOUT_S = 10.0
 # Delegated runner bearers last 30 minutes and refresh five minutes before
 # expiry. A one-minute cadence allows several retries without giving the child
 # the runner binding token; cached factory calls stay local and cheap.
+_CLAUDE_PERMISSION_REFRESH_INTERVAL_S = 60.0
+_AUTO_CLAUDE_PERMISSION_REFRESH_TASKS: dict[str, asyncio.Task[None]] = {}
+
+
+async def _refresh_claude_permission_hook_auth(
+    bridge_dir: Path,
+    auth_token_factory: Callable[[], str | None],
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Keep a native Claude hook bearer fresh from the privileged parent."""
+    from omnigent.claude_native_bridge import refresh_permission_hook_auth
+
+    while True:
+        await sleep(_CLAUDE_PERMISSION_REFRESH_INTERVAL_S)
+        try:
+            token = await asyncio.to_thread(auth_token_factory)
+            if token:
+                refresh_permission_hook_auth(bridge_dir, f"Bearer {token}")
+        except Exception:  # noqa: BLE001 — retry without stopping the terminal
+            _logger.debug("Could not refresh Claude permission-hook auth", exc_info=True)
+
+
+def _register_claude_permission_refresh_task(session_id: str, task: asyncio.Task[None]) -> None:
+    """Register the privileged refresh task owned by a Claude terminal."""
+    incumbent = _AUTO_CLAUDE_PERMISSION_REFRESH_TASKS.get(session_id)
+    if incumbent is not None and incumbent is not task:
+        incumbent.cancel()
+    _AUTO_CLAUDE_PERMISSION_REFRESH_TASKS[session_id] = task
+
+    def _evict(done_task: asyncio.Task[None]) -> None:
+        if _AUTO_CLAUDE_PERMISSION_REFRESH_TASKS.get(session_id) is done_task:
+            del _AUTO_CLAUDE_PERMISSION_REFRESH_TASKS[session_id]
+
+    task.add_done_callback(_evict)
+
+
+async def teardown_claude_native_permission_refresh(session_id: str) -> None:
+    """Cancel and await one session's privileged hook-auth refresh task."""
+    task = _AUTO_CLAUDE_PERMISSION_REFRESH_TASKS.pop(session_id, None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    _done, pending = await asyncio.wait({task}, timeout=_AUTO_FORWARDER_CANCEL_TIMEOUT_S)
+    if pending:
+        _logger.warning(
+            "Claude permission-hook refresh for %s did not finish within %.0fs",
+            session_id,
+            _AUTO_FORWARDER_CANCEL_TIMEOUT_S,
+        )
+
+
+async def teardown_all_claude_native_permission_refreshes() -> None:
+    """Tear down every privileged Claude hook-auth refresh task."""
+    for session_id in list(_AUTO_CLAUDE_PERMISSION_REFRESH_TASKS):
+        with contextlib.suppress(Exception):
+            await teardown_claude_native_permission_refresh(session_id)
 
 
 class _CodexNativeModelOptionsNotReady(RuntimeError):
@@ -6175,6 +6232,7 @@ async def _auto_create_claude_terminal(
     # Cancel any surviving forwarder BEFORE wiping its cursor/seen state, else it
     # re-posts with fresh dedup state alongside the forwarder spawned below.
     await _cancel_auto_forwarder_task(session_id)
+    await teardown_claude_native_permission_refresh(session_id)
     reset_transcript_forward_state(bridge_dir)
     _logger.info(
         "Claude terminal bridge prepared: session=%s bridge_dir=%s",
@@ -6709,6 +6767,12 @@ async def _auto_create_claude_terminal(
         name=f"claude-forwarder-{session_id}",
     )
     _register_auto_forwarder_task(session_id, _forwarder_task)
+    if _auth_factory is not None:
+        _refresh_task = asyncio.create_task(
+            _refresh_claude_permission_hook_auth(bridge_dir, _auth_factory),
+            name=f"claude-permission-hook-refresh-{session_id}",
+        )
+        _register_claude_permission_refresh_task(session_id, _refresh_task)
     _logger.info(
         "Auto-created claude terminal + forwarder for session %s; "
         "forwarder_task=%s elapsed_ms=%.0f",

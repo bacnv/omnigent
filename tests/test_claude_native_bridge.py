@@ -7636,6 +7636,61 @@ def test_claude_pane_ready_is_false_without_an_advertised_pane(tmp_path: Path) -
     assert claude_native_bridge.claude_pane_ready(tmp_path / "nope") is False
 
 
+def _write_permission_hook(bridge_dir: Path, payload: dict[str, Any]) -> None:
+    """Write a permission_hook.json fixture via the production writer."""
+    claude_native_bridge._write_json_file(
+        bridge_dir / claude_native_bridge._PERMISSION_HOOK_FILE, payload
+    )
+
+
+def test_refresh_permission_hook_auth_updates_only_authorization(tmp_path: Path) -> None:
+    """Refresh preserves routing headers while replacing the bearer token."""
+    _write_permission_hook(
+        tmp_path,
+        {
+            "ap_server_url": "http://127.0.0.1:8787",
+            "ap_auth_headers": {
+                "Authorization": "Bearer old-token",
+                "X-Omnigent-Trace": "abc",
+            },
+            "updated_at": 1000.0,
+        },
+    )
+
+    assert refresh_permission_hook_auth(tmp_path, "Bearer new-token") is True
+
+    config = read_permission_hook_config(tmp_path)
+    assert config["ap_server_url"] == "http://127.0.0.1:8787"
+    assert config["ap_auth_headers"]["Authorization"] == "Bearer new-token"
+    assert config["ap_auth_headers"]["X-Omnigent-Trace"] == "abc"
+    assert config["updated_at"] != 1000.0
+
+
+def test_refresh_permission_hook_auth_unchanged_bearer_is_noop(tmp_path: Path) -> None:
+    """An unchanged bearer does not rewrite the hook config."""
+    _write_permission_hook(
+        tmp_path,
+        {
+            "ap_server_url": "http://127.0.0.1:8787",
+            "ap_auth_headers": {"Authorization": "Bearer same"},
+            "updated_at": 1000.0,
+        },
+    )
+
+    assert refresh_permission_hook_auth(tmp_path, "Bearer same") is False
+    assert read_permission_hook_config(tmp_path)["updated_at"] == 1000.0
+
+
+def test_refresh_permission_hook_auth_missing_config_is_noop(tmp_path: Path) -> None:
+    """Missing or serverless configs are not created or changed."""
+    assert refresh_permission_hook_auth(tmp_path, "Bearer x") is False
+    assert not (tmp_path / claude_native_bridge._PERMISSION_HOOK_FILE).exists()
+
+    _write_permission_hook(tmp_path, {"ap_auth_headers": {}})
+    assert refresh_permission_hook_auth(tmp_path, "Bearer y") is False
+    assert read_permission_hook_config(tmp_path).get("ap_server_url") is None
+
+
 def test_message_display_shell_command_round_trips(tmp_path: Path) -> None:
     """The generated MessageDisplay shell appender feeds the deltas reader.
 
