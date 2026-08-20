@@ -48,6 +48,7 @@ from omnigent.claude_native_bridge import (
     read_transcript_items_since,
     read_transcript_path,
     record_hook_event,
+    refresh_permission_hook_auth,
     start_tool_relay,
     stop_hook_seen_since,
     write_tmux_target,
