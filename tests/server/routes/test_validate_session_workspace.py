@@ -61,7 +61,7 @@ async def test_validate_existing_host_workspace_allows_admin_owned_host(
         agent=SimpleNamespace(bundle_location=None),
         agent_cache=SimpleNamespace(),
         host_store=_FakeHostStore(host),
-        host_registry=object(),
+        host_registry=SimpleNamespace(get=lambda _host_id: object()),
         permission_store=perms,
     )
     assert result == "/tmp/canonical"
@@ -99,7 +99,7 @@ async def test_validate_session_workspace_forwards_permission_store(
 ) -> None:
     host = _FakeHost(user_id="admin@example.com")
     app = FastAPI()
-    app.state.host_registry = object()
+    app.state.host_registry = SimpleNamespace(get=lambda _host_id: object())
     app.state.host_store = _FakeHostStore(host)
     request = _build_request(app)
     perms = _FakePermissionStore(admins={"admin@example.com"})

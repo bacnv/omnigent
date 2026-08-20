@@ -253,6 +253,7 @@ async def test_list_worktrees_unknown_host_404(
 async def test_list_worktrees_admin_owned_allowed_regular_denied(
     wt_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
     db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Admin-owned host worktree list is allowed; regular cross-owner still 403s."""
     from omnigent.server.auth import AuthProvider
@@ -267,6 +268,12 @@ async def test_list_worktrees_admin_owned_allowed_regular_denied(
             return request.headers.get("X-Test-User")
 
     auth = _Stub()
+    import omnigent.server.routes._host_worktree as host_worktree
+
+    async def _listed_worktrees(**_kwargs: object) -> list[dict[str, object]]:
+        return []
+
+    monkeypatch.setattr(host_worktree, "list_worktrees_on_host", _listed_worktrees)
     permission_store = SqlAlchemyPermissionStore(db_uri)
     permission_store.ensure_user("admin@example.com")
     permission_store.set_admin("admin@example.com", True)
@@ -289,10 +296,17 @@ async def test_list_worktrees_admin_owned_allowed_regular_denied(
         prefix="/v1",
     )
 
+    admin_host_id = "a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7"
     host_store.upsert_on_connect(
-        host_id="a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+        host_id=admin_host_id,
         name="admin-laptop",
         user_id="admin@example.com",
+    )
+    registry.register(
+        admin_host_id,
+        object(),  # type: ignore[arg-type]  # The proxy is stubbed above.
+        HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="admin-laptop"),
+        owner="admin@example.com",
     )
     host_store.upsert_on_connect(
         host_id="b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8",
@@ -314,5 +328,5 @@ async def test_list_worktrees_admin_owned_allowed_regular_denied(
             headers={"X-Test-User": "alice@example.com"},
         )
 
-    assert admin_resp.status_code != 403, admin_resp.text
+    assert admin_resp.status_code == 200, admin_resp.text
     assert deny_resp.status_code == 403, deny_resp.text
