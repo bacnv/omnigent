@@ -326,6 +326,7 @@ async def test_create_directory_windows_drive_path_accepted(
 async def test_create_directory_admin_owned_allowed_regular_denied(
     mkdir_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
     db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Admin-owned host mkdir is allowed; regular cross-owner still 403s."""
 
@@ -341,6 +342,12 @@ async def test_create_directory_admin_owned_allowed_regular_denied(
             return request.headers.get("X-Test-User")
 
     auth = _Stub()
+    import omnigent.server.routes.hosts as hosts_routes
+
+    async def _created_directory(**_kwargs: object) -> dict[str, object]:
+        return {"status": "ok", "path": "/tmp/x", "error": None}
+
+    monkeypatch.setattr(hosts_routes, "_proxy_create_dir", _created_directory)
     permission_store = SqlAlchemyPermissionStore(db_uri)
     permission_store.ensure_user("admin@example.com")
     permission_store.set_admin("admin@example.com", True)
@@ -363,10 +370,17 @@ async def test_create_directory_admin_owned_allowed_regular_denied(
         prefix="/v1",
     )
 
+    admin_host_id = "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5"
     host_store.upsert_on_connect(
-        host_id="e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+        host_id=admin_host_id,
         name="admin-laptop",
         user_id="admin@example.com",
+    )
+    registry.register(
+        admin_host_id,
+        object(),  # type: ignore[arg-type]  # The proxy is stubbed below.
+        HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="admin-laptop"),
+        owner="admin@example.com",
     )
     host_store.upsert_on_connect(
         host_id="f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
@@ -388,6 +402,5 @@ async def test_create_directory_admin_owned_allowed_regular_denied(
             headers={"X-Test-User": "alice@example.com"},
         )
 
-    # Offline (409) is fine for admin-owned; 403 means the bypass failed.
-    assert admin_resp.status_code != 403, admin_resp.text
+    assert admin_resp.status_code == 200, admin_resp.text
     assert deny_resp.status_code == 403, deny_resp.text
