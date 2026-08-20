@@ -314,6 +314,7 @@ def create_scheduled_tasks_router(
                     user_id=user_id,
                     host_id=host_id,
                     host_store=host_store,
+                    permission_store=permission_store,
                 )
                 if host.sandbox_provider is not None:
                     raise OmnigentError(
