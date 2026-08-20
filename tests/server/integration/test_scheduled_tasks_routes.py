@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -386,7 +387,7 @@ async def _wire_real_host_ownership(
     host_store = HostStore(db_uri)
     host_store.upsert_on_connect(host_id, "sched-host", host_owner)
     auth_app.state.host_store = host_store
-    auth_app.state.host_registry = object()
+    auth_app.state.host_registry = SimpleNamespace(get=lambda _host_id: object())
 
     perms = SqlAlchemyPermissionStore(db_uri)
     perms.ensure_user(host_owner)

@@ -608,6 +608,7 @@ async def test_list_filesystem_owner_check_blocks_other_users(
 async def test_list_filesystem_admin_owned_host_allowed_for_other_user(
     fs_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
     db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A regular user CAN browse an admin-owned host's filesystem."""
     from omnigent.server.auth import AuthProvider
@@ -622,6 +623,16 @@ async def test_list_filesystem_admin_owned_host_allowed_for_other_user(
             return request.headers.get("X-Test-User")
 
     auth = _Stub()
+    import omnigent.server.routes.hosts as hosts_routes
+
+    async def _listed_directory(**_kwargs: object) -> dict[str, object]:
+        return {"status": "ok", "entries": [], "has_more": False, "error": None}
+
+    async def _model_options(**_kwargs: object) -> dict[str, object]:
+        return {"status": "ok", "models": []}
+
+    monkeypatch.setattr(hosts_routes, "_proxy_list_dir", _listed_directory)
+    monkeypatch.setattr(hosts_routes, "_proxy_model_options", _model_options)
     permission_store = SqlAlchemyPermissionStore(db_uri)
     permission_store.ensure_user("alice@example.com")
     permission_store.set_admin("alice@example.com", True)
@@ -643,10 +654,17 @@ async def test_list_filesystem_admin_owned_host_allowed_for_other_user(
         prefix="/v1",
     )
 
+    admin_host_id = "e5f60718293a4b5c6d7e8f901a2b3c4d"
     host_store.upsert_on_connect(
-        host_id="e5f60718293a4b5c6d7e8f901a2b3c4d",
+        host_id=admin_host_id,
         name="alice-laptop",
         user_id="alice@example.com",
+    )
+    registry.register(
+        admin_host_id,
+        object(),  # type: ignore[arg-type]  # The proxies are stubbed above.
+        HostHelloFrame(version="0.1.0-test", frame_protocol_version=1, name="alice-laptop"),
+        owner="alice@example.com",
     )
 
     async with AsyncClient(
@@ -660,11 +678,8 @@ async def test_list_filesystem_admin_owned_host_allowed_for_other_user(
             "/v1/hosts/e5f60718293a4b5c6d7e8f901a2b3c4d/harnesses/claude/model-options",
             headers={"X-Test-User": "bob@example.com"},
         )
-    # 409 offline is fine — only ownership is under test.
-    assert resp.status_code != 403, (
-        f"Expected admin-owner bypass to pass ownership, got 403: {resp.text}"
-    )
-    assert model_resp.status_code != 403, model_resp.text
+    assert resp.status_code == 200, resp.text
+    assert model_resp.status_code == 200, model_resp.text
 
 
 # ── Pagination ──────────────────────────────────────────
