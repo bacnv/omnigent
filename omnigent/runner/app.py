@@ -2017,6 +2017,12 @@ def create_runner_app(
         )
         _teardown_task.add_done_callback(_background_tasks.discard)
         _background_tasks.add(_teardown_task)
+        if event.terminal_name == "claude" and event.session_key == "main":
+            _refresh_teardown_task = asyncio.create_task(
+                _native_runtime.teardown_claude_native_permission_refresh(event.session_id)
+            )
+            _refresh_teardown_task.add_done_callback(_background_tasks.discard)
+            _background_tasks.add(_refresh_teardown_task)
 
         # A dead required terminal cannot still be working a turn.
         _native_pane_status.pop(event.session_id, None)
@@ -3591,6 +3597,7 @@ def create_runner_app(
         _repl_terminal_ensure_locks.pop(session_id, None)
         _interrupted_sessions.discard(session_id)
         await _cancel_auto_forwarder_task(session_id)
+        await _native_runtime.teardown_claude_native_permission_refresh(session_id)
         # Close any OpenCode server that no forwarder adopted.
         await _native_runtime.teardown_opencode_native_server(session_id)
 
@@ -8202,6 +8209,7 @@ def create_runner_app(
         if process_manager is not None:
             await process_manager.release(session_id)
         await resource_registry.cleanup_session(session_id)
+        await _native_runtime.teardown_claude_native_permission_refresh(session_id)
         await _delete_native_bridge_dirs(
             server_client=server_client,
             session_id=session_id,
