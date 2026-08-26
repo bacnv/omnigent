@@ -11,6 +11,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import {
   composeSandboxWorkspace,
+  defaultUserWorkspace,
   deriveHomeDir,
   deriveRepoName,
   describeCreateError,
@@ -29,7 +30,7 @@ import {
 } from "./NewChatDialog";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
-import { authenticatedFetch } from "@/lib/identity";
+import { authenticatedFetch, getCurrentUserId, resolveIdentity } from "@/lib/identity";
 import { BACKGROUND_SESSION_TITLES_STORAGE_KEY } from "@/lib/backgroundSessionTitlesPreferences";
 import {
   useHostModelOptions,
@@ -64,6 +65,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 vi.mock("@/lib/identity", async (importOriginal) => ({
   ...(await importOriginal<typeof IdentityModule>()),
   authenticatedFetch: vi.fn(),
+  getCurrentUserId: vi.fn(() => null),
+  resolveIdentity: vi.fn(() => Promise.resolve(null)),
 }));
 // Desktop bridge: default to the browser/jsdom world (isElectronShell → false),
 // so existing tests are unaffected; the "Run on this machine" suite opts into
@@ -102,6 +105,7 @@ vi.mock("@/hooks/useAvailableAgents", () => ({
 }));
 vi.mock("@/hooks/useHostFilesystem", () => ({
   useHostFilesystem: vi.fn(),
+  createHostDirectory: vi.fn(() => Promise.resolve("/created")),
   // WorkspacePicker (rendered by the file browser) reads this on mount;
   // an idle mutation keeps it inert for these tests.
   useCreateHostDirectory: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
@@ -174,6 +178,8 @@ vi.mock("@/store/chatStore", async (importOriginal) => ({
 }));
 
 const authenticatedFetchMock = vi.mocked(authenticatedFetch);
+const getCurrentUserIdMock = vi.mocked(getCurrentUserId);
+const resolveIdentityMock = vi.mocked(resolveIdentity);
 const useHostsMock = vi.mocked(useHosts);
 /** Stable per-harness model-catalog results (identity matters: effects key on them). */
 const CLAUDE_MODEL_OPTIONS_RESULT = {
@@ -542,6 +548,36 @@ describe("sandbox repository helpers", () => {
 // session on a host. It reads the parent of the first home-listing entry, so
 // these pin the cases the seed depends on: a normal entry, a top-level entry,
 // and the one case it can't resolve (empty home → null → blank field).
+describe("defaultUserWorkspace", () => {
+  it.each([
+    ["/home/claude", "bacnv", "/home/claude/bacnv"],
+    ["/root", "bacnv", "/root/bacnv"],
+    ["/", "bacnv", "/bacnv"],
+  ])("builds the default workspace", (home, username, expected) => {
+    expect(defaultUserWorkspace(home, username)).toBe(expected);
+  });
+
+  it.each([
+    "",
+    ".",
+    "..",
+    "../escape",
+    "/absolute",
+    "a/b",
+    "a\\b",
+    " alice ",
+    "Alice",
+    "bac.nv",
+    "bac@nv",
+  ])("rejects unsafe username %s", (username) =>
+    expect(defaultUserWorkspace("/home/claude", username)).toBeNull(),
+  );
+
+  it.each(["", " ", "  "])("returns null for blank home %j", (home) =>
+    expect(defaultUserWorkspace(home, "bacnv")).toBeNull(),
+  );
+});
+
 describe("deriveHomeDir", () => {
   it("returns the parent directory of the first entry", () => {
     expect(deriveHomeDir([fsEntry("/Users/corey/projects"), fsEntry("/Users/corey/Desktop")])).toBe(
@@ -727,6 +763,10 @@ function mockAgents(agents: AvailableAgent[]) {
 // recent workspace so the working-directory field seeds to a known path.
 function setupLandingMocks() {
   authenticatedFetchMock.mockReset();
+  getCurrentUserIdMock.mockReset();
+  getCurrentUserIdMock.mockReturnValue(null);
+  resolveIdentityMock.mockReset();
+  resolveIdentityMock.mockResolvedValue(null);
   useHostsMock.mockReset();
   useHostModelOptionsMock.mockReset();
   useAvailableAgentsMock.mockReset();
@@ -913,7 +953,7 @@ function openSelect(testId: string): void {
 /** Open the config-modal Select at <triggerTestId> and click the option labeled <label>. */
 function pickSelectOption(triggerTestId: string, label: string): void {
   openSelect(triggerTestId);
-  fireEvent.click(screen.getByText(label));
+  fireEvent.click(screen.getAllByText(label).at(-1)!);
 }
 
 /** Dismiss any open menu. */
@@ -1682,9 +1722,93 @@ describe("NewChatLandingScreen", () => {
     );
   });
 
-  it("falls back to the host's home directory when there is no recent", async () => {
-    // No recents for this host → the field seeds from the home listing
-    // (parent of the first entry), so a first-ever session is still one click.
+  it("defaults a fresh external session to Claude native, Sonnet, and high effort", async () => {
+    localStorage.clear();
+    mockAgents([
+      {
+        id: "a_codex",
+        name: "codex-native-ui",
+        display_name: "Codex",
+        description: null,
+        harness: "codex-native",
+        skills: [],
+      },
+      {
+        id: "a_claude",
+        name: "claude-native-ui",
+        display_name: "Claude Code",
+        description: null,
+        harness: "claude-native",
+        skills: [],
+      },
+    ]);
+    renderLanding();
+    await waitFor(() => expect(screen.getByTestId("new-chat-landing-config-gear")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("new-chat-landing-config-gear"));
+    expect(screen.getByTestId("new-chat-landing-config-model").textContent).toContain("Sonnet 4.6");
+    expect(screen.getByTestId("new-chat-landing-config-effort").textContent).toContain("High");
+  });
+
+  it("seeds a safe user workspace after home and identity resolve", async () => {
+    localStorage.clear();
+    getCurrentUserIdMock.mockReturnValue("bacnv");
+    useHostFilesystemMock.mockReturnValue({
+      data: { entries: [fsEntry("/home/claude/projects")], truncated: false },
+      isLoading: false,
+      error: null,
+      isPlaceholderData: false,
+    } as unknown as ReturnType<typeof useHostFilesystem>);
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("bacnv"),
+    );
+  });
+
+  it("waits for identity before falling back to the host home", async () => {
+    localStorage.clear();
+    let finishIdentity!: () => void;
+    resolveIdentityMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishIdentity = () => {
+            getCurrentUserIdMock.mockReturnValue("bacnv");
+            resolve("bacnv");
+          };
+        }),
+    );
+    useHostFilesystemMock.mockReturnValue({
+      data: { entries: [fsEntry("/home/claude/projects")], truncated: false },
+      isLoading: false,
+      error: null,
+      isPlaceholderData: false,
+    } as unknown as ReturnType<typeof useHostFilesystem>);
+
+    renderLanding();
+    expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain(
+      "Working directory",
+    );
+    finishIdentity();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("bacnv"),
+    );
+  });
+
+  it("does not overwrite a recent workspace with the generated default", async () => {
+    getCurrentUserIdMock.mockReturnValue("bacnv");
+    useHostFilesystemMock.mockReturnValue({
+      data: { entries: [fsEntry("/home/claude/projects")], truncated: false },
+      isLoading: false,
+      error: null,
+      isPlaceholderData: false,
+    } as unknown as ReturnType<typeof useHostFilesystem>);
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("repo"),
+    );
+  });
+
+  it("falls back to the host's home directory when there is no recent or identity", async () => {
     localStorage.clear();
     useHostFilesystemMock.mockReturnValue({
       data: { entries: [fsEntry("/home/corey/projects")], truncated: false },
@@ -1693,7 +1817,6 @@ describe("NewChatLandingScreen", () => {
       isPlaceholderData: false,
     } as unknown as ReturnType<typeof useHostFilesystem>);
     renderLanding();
-    // deriveHomeDir("/home/corey/projects") → "/home/corey" → chip basename.
     await waitFor(() =>
       expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("corey"),
     );
@@ -1746,7 +1869,7 @@ describe("NewChatLandingScreen", () => {
     // Opus 4.8 / Sonnet 4.6 / Haiku 4.5) — never the removed/static rows.
     openSelect("new-chat-landing-config-model");
     expect(screen.getByText("Opus 4.8")).toBeTruthy();
-    expect(screen.getByText("Sonnet 4.6")).toBeTruthy();
+    expect(screen.getAllByText("Sonnet 4.6").length).toBeGreaterThan(0);
     expect(screen.queryByText("Fable")).toBeNull();
     expect(screen.queryByText("Sonnet 5")).toBeNull();
     closeMenu();
@@ -1866,21 +1989,25 @@ describe("NewChatLandingScreen", () => {
     expect(body.reasoning_effort).toBeUndefined();
   });
 
-  it("remembers the Codex effort per harness without leaking it onto Claude", () => {
+  it("remembers the Codex effort per harness without leaking it onto Claude", async () => {
     renderLanding();
     openAgentConfig("a2");
     pickSelectOption("new-chat-landing-config-effort", "high");
     saveConfig();
 
-    // Claude's row reopens on its own remembered effort (nothing stored →
-    // Default) — the Codex pick must not ride the shared state across.
+    // Claude's fresh High default wins — the Codex pick must not ride the
+    // shared state across.
     openAgentConfig("a1");
-    expect(screen.getByTestId("new-chat-landing-config-effort").textContent).toContain("Default");
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-config-effort").textContent).toContain("High"),
+    );
     saveConfig();
 
     // Codex reopens on the remembered pick, still valid for its ladder.
     openAgentConfig("a2");
-    expect(screen.getByTestId("new-chat-landing-config-effort").textContent).toContain("high");
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-config-effort").textContent).toContain("high"),
+    );
   });
 
   it("sends the selected Codex launch model without changing Claude's remembered model", async () => {
@@ -1897,10 +2024,9 @@ describe("NewChatLandingScreen", () => {
     fireEvent.click(screen.getByText("GPT-5.6"));
     saveConfig();
 
-    // The Codex model is remembered under codex-native only; Claude Code's
-    // picker should reopen on its own Default instead of inheriting the GPT id.
+    // The Codex model is remembered under codex-native only; Claude Code does
+    // not inherit the GPT id. Its fresh Sonnet default is covered separately.
     openAgentConfig("a1");
-    expect(screen.getByTestId("new-chat-landing-config-model").textContent).toContain("Default");
     expect(screen.getByTestId("new-chat-landing-config-model").textContent).not.toContain(
       "GPT-5.6",
     );
@@ -3793,8 +3919,8 @@ describe("NewChatLandingScreen agent picker + config gear", () => {
     expect(tooltip.textContent).toContain("Permissions:");
     expect(tooltip.textContent).toContain("Plan");
     expect(tooltip.textContent).toContain("Model:");
-    // Unset effort reads "Default" (mirrors the modal), never the "—" sentinel.
-    expect(tooltip.textContent).toContain("Effort: Default");
+    // A fresh Claude-native session defaults to high effort.
+    expect(tooltip.textContent).toContain("Effort: High");
     expect(tooltip.textContent).not.toContain("—");
   });
 
@@ -4377,10 +4503,10 @@ describe("NewChatLandingScreen smart routing", () => {
       "Smart Routing",
     );
     closeMenu();
-    // Claude Code never had routing picked, so it stays on Default.
+    // Claude Code never had anything stored, so it starts on its Sonnet default.
     openAgentConfig("a1");
     const model = screen.getByTestId("new-chat-landing-config-model");
-    expect(model.textContent).toContain("Default");
+    expect(model.textContent).toContain("Sonnet 4.6");
     expect(model.textContent).not.toContain("Smart Routing");
   });
 
