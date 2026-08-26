@@ -3270,6 +3270,12 @@ def create_runner_app(
         )
         _teardown_task.add_done_callback(_background_tasks.discard)
         _background_tasks.add(_teardown_task)
+        if event.terminal_name == "claude" and event.session_key == "main":
+            _refresh_teardown_task = asyncio.create_task(
+                _native_runtime.teardown_claude_native_permission_refresh(event.session_id)
+            )
+            _refresh_teardown_task.add_done_callback(_background_tasks.discard)
+            _background_tasks.add(_refresh_teardown_task)
 
         if event.terminal_name in ("qwen", "antigravity") and event.session_key == "main":
             _publish_event(event.session_id, {"type": "session.status", "status": "idle"})
@@ -4397,6 +4403,7 @@ def create_runner_app(
         _repl_terminal_ensure_locks.pop(session_id, None)
         _interrupted_sessions.discard(session_id)
         await _cancel_auto_forwarder_task(session_id)
+        await _native_runtime.teardown_claude_native_permission_refresh(session_id)
 
         if process_manager is not None:
             await process_manager.forward_cancel(session_id)
@@ -11008,6 +11015,7 @@ def create_runner_app(
         _hermes_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_ensure_locks.pop(session_id, None)
         await resource_registry.cleanup_session(session_id)
+        await _native_runtime.teardown_claude_native_permission_refresh(session_id)
         await _delete_native_bridge_dirs(
             server_client=server_client,
             session_id=session_id,

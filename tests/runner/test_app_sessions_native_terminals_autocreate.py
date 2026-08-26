@@ -3391,8 +3391,9 @@ async def test_auto_create_claude_terminal_registers_permission_hook(
                 metadata={"terminal_name": "claude", "session_key": "main", "running": True},
             )
 
+    session_id = "4e92b5a0c0ee6db3f874f9c4a3f855a5"
     await _auto_create_claude_terminal(
-        "4e92b5a0c0ee6db3f874f9c4a3f855a5",
+        session_id,
         _FakeResourceRegistry(),
         lambda _sid, _evt: None,
         server_client=NullServerClient(),  # type: ignore[arg-type]
@@ -3432,6 +3433,16 @@ async def test_auto_create_claude_terminal_registers_permission_hook(
 
     await asyncio.sleep(0)
     assert isinstance(forwarder_kwargs.get("auth"), _RunnerDatabricksAuth)
+
+    from omnigent.runner.native.orchestration import (
+        _AUTO_CLAUDE_PERMISSION_REFRESH_TASKS,
+        teardown_claude_native_permission_refresh,
+    )
+
+    refresh_task = _AUTO_CLAUDE_PERMISSION_REFRESH_TASKS[session_id]
+    assert not refresh_task.done()
+    await teardown_claude_native_permission_refresh(session_id)
+    assert refresh_task.cancelled()
 
 
 # ── What a plain claude-native launch must NOT carry ─────────────────
