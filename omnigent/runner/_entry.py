@@ -1561,12 +1561,16 @@ def create_app(
         _pane_reaper = getattr(app.state, "native_pane_reaper", None)
         if _pane_reaper is not None:
             await _pane_reaper.shutdown()
-        # Host shutdown skips per-session deletion, so close native servers here.
+        # Host shutdown skips per-session deletion, so close native servers and
+        # stop the Claude permission refreshers here.
         from omnigent.runner.native import (
+            teardown_all_claude_native_permission_refreshes,
             teardown_all_codex_native_app_servers,
             teardown_all_opencode_native_servers,
         )
 
+        with contextlib.suppress(Exception):
+            await teardown_all_claude_native_permission_refreshes()
         with contextlib.suppress(Exception):
             await teardown_all_codex_native_app_servers()
         with contextlib.suppress(Exception):
