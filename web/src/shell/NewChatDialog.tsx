@@ -78,7 +78,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { authenticatedFetch } from "@/lib/identity";
+import { authenticatedFetch, getCurrentUserId, resolveIdentity } from "@/lib/identity";
 import { isImeCompositionKeyEvent } from "@/lib/ime";
 import { isComposerSendKey, readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
 import { attachmentKey, validateAttachments } from "@/lib/attachments";
@@ -203,7 +203,11 @@ import { useRecentHarnesses } from "@/hooks/useRecentHarnesses";
 import { useRecentWorkspaces } from "@/hooks/useRecentWorkspaces";
 import { useDirectorySessions } from "@/hooks/useDirectorySessions";
 import { useRunnerHealthRegistration } from "@/hooks/RunnerHealthProvider";
-import { useHostFilesystem, type HostFilesystemEntry } from "@/hooks/useHostFilesystem";
+import {
+  createHostDirectory,
+  useHostFilesystem,
+  type HostFilesystemEntry,
+} from "@/hooks/useHostFilesystem";
 import { useHostWorktrees } from "@/hooks/useHostWorktrees";
 import { useNativeServerSwitcherForMainSurface } from "@/hooks/useNativeServerSwitcher";
 import type { WorkspaceFile } from "@/hooks/useWorkspaceChangedFiles";
@@ -819,6 +823,14 @@ export function deriveHomeDir(entries: HostFilesystemEntry[]): string | null {
   const slash = first.path.lastIndexOf("/");
   if (slash < 0) return null;
   return slash === 0 ? "/" : first.path.slice(0, slash);
+}
+
+export function defaultUserWorkspace(home: string, username: string): string | null {
+  if (!home.trim()) return null;
+  const base = home === "/" ? "" : home.replace(/\/+$/, "");
+  const user = username.trim();
+  if (user !== username || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(user)) return null;
+  return `${base}/${user}`;
 }
 
 /**
@@ -1967,6 +1979,7 @@ interface LandingDraft {
   sandboxRepoUrl: string;
   sandboxRepoBranch: string;
   workspace: string;
+  workspaceWasDefaulted: boolean;
   branchName: string;
   autoSeededBranch: string;
   prefilledBranch: string;
@@ -2289,6 +2302,18 @@ export function NewChatLandingScreen() {
   const [pickedAgentId, setPickedAgentId] = useState<string | null>(
     () => restoredDraft?.pickedAgentId ?? (projectParam !== "" ? null : readLastAgentId()),
   );
+  const [currentUserId, setCurrentUserId] = useState<string | null | undefined>(
+    () => getCurrentUserId() ?? undefined,
+  );
+  useEffect(() => {
+    let cancelled = false;
+    void resolveIdentity().then(() => {
+      if (!cancelled) setCurrentUserId(getCurrentUserId());
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [selectedHostId, setSelectedHostId] = useState<string | null>(
     () => restoredDraft?.selectedHostId ?? null,
   );
@@ -2375,6 +2400,7 @@ export function NewChatLandingScreen() {
     () => restoredDraft?.sandboxRepoBranch ?? "",
   );
   const [workspace, setWorkspace] = useState<string>(() => restoredDraft?.workspace ?? "");
+  const workspaceWasDefaultedRef = useRef(restoredDraft?.workspaceWasDefaulted ?? false);
   const [branchName, setBranchName] = useState<string>(() => restoredDraft?.branchName ?? "");
   // Branch the worktree-default effect auto-seeded (empty = none), so it can
   // retract its own seed when the default turns off. In the preserved draft so
@@ -2513,6 +2539,7 @@ export function NewChatLandingScreen() {
     sandboxRepoUrl,
     sandboxRepoBranch,
     workspace,
+    workspaceWasDefaulted: workspaceWasDefaultedRef.current,
     branchName,
     autoSeededBranch,
     prefilledBranch,
@@ -2621,6 +2648,7 @@ export function NewChatLandingScreen() {
     setSandboxSelected(false);
     setSelectedHostId(null);
     setPickedAgentId(projectParam !== "" ? null : readLastAgentId());
+    workspaceWasDefaultedRef.current = false;
     setWorkspace("");
     setBranchName("");
     setAutoSeededBranch("");
@@ -2741,10 +2769,13 @@ export function NewChatLandingScreen() {
   // falls through to the global one, then to blank (fork from current branch).
   const projectBaseBranch = storedProjectConfig?.base_branch?.trim() || null;
 
-  // The path the once-per-host auto-seed WOULD land on: the most-recent path,
-  // else the derived home. Exposed as a memo so we can probe its repo for
-  // worktrees before committing to it (see the fork-fresh redirect below).
-  const autoSeedCandidate = useMemo(() => recent[0] ?? derivedHome ?? null, [recent, derivedHome]);
+  // Fork-fresh applies only to an existing recent workspace. A generated
+  // per-user fallback may not exist yet and is intentionally a plain workspace.
+  const userDir = useMemo(
+    () => (derivedHome == null ? null : defaultUserWorkspace(derivedHome, currentUserId ?? "")),
+    [derivedHome, currentUserId],
+  );
+  const autoSeedCandidate = useMemo(() => recent[0] ?? null, [recent]);
   // "Fork fresh from default": when the project defines a default base branch,
   // a fresh new-chat must NOT silently continue in the last-used worktree — it
   // should fork a new branch off that default. The auto-seed can land on a
@@ -2796,34 +2827,24 @@ export function NewChatLandingScreen() {
     autoSeedCandidate,
   ]);
 
-  // Seed the working directory once per host, into an empty field only, so an
-  // explicit pick isn't clobbered. Prefer the most-recent path; else the
-  // derived home (which can arrive a render later, hence the dep). Holds
-  // off while a project prefill is deciding on a workspace of its own.
+  // Seed once per host without replacing project or explicit choices.
   useEffect(() => {
-    if (!prefillSettled) return;
-    if (selectedHostId === null) return;
+    if (!prefillSettled || sandboxSelected || selectedHostId === null) return;
     if (seededHostRef.current === selectedHostId) return;
-    if (autoSeedCandidate === null) return;
-    // Fork-fresh redirect pending: wait for the probe rather than seeding the
-    // wrong path (and locking the once-per-host guard).
+    if (recent[0] == null && currentUserId === undefined) return;
     if (forkFreshMainPath === undefined) return;
 
     const didForkFresh = forkFreshMainPath !== null;
-    const candidate = didForkFresh ? forkFreshMainPath : autoSeedCandidate;
+    const candidate = didForkFresh ? forkFreshMainPath : (recent[0] ?? userDir ?? derivedHome);
+    if (!candidate) return;
     seededHostRef.current = selectedHostId;
-    // Seed into an empty field only, so a config-supplied (or explicitly
-    // picked) workspace isn't clobbered.
     const seededWorkspace = workspace === "";
-    if (seededWorkspace) setWorkspace(candidate);
-    // Fork fresh only when we actually seeded the redirect AND no branch is set
-    // — a project that supplies its own workspace keeps a plain launch, and a
-    // branch typed/picked while the probe was loading isn't overwritten (the
-    // same guards the opt-in-worktree effect below enforces).
+    if (seededWorkspace) {
+      workspaceWasDefaultedRef.current =
+        !didForkFresh && recent[0] == null && candidate === userDir;
+      setWorkspace(candidate);
+    }
     if (didForkFresh && seededWorkspace && branchName === "" && prefilledBranch === "") {
-      // Preempt the opt-in-worktree effect so it can't also seed a branch, then
-      // name one here to fork fresh off the project default. Store the ref in
-      // the raw representation that effect compares against (workspaceTrimmed).
       worktreeSeededForRef.current = candidate;
       // Not tracked as a retractable auto-seed: this fork-fresh branch is driven
       // by the project's base_branch (to fork off it), independent of the
@@ -2832,8 +2853,12 @@ export function NewChatLandingScreen() {
     }
   }, [
     selectedHostId,
-    autoSeedCandidate,
+    recent,
+    userDir,
+    derivedHome,
+    currentUserId,
     prefillSettled,
+    sandboxSelected,
     forkFreshMainPath,
     workspace,
     branchName,
@@ -2859,6 +2884,7 @@ export function NewChatLandingScreen() {
     prefillConfig?.agentId != null &&
     agents !== undefined &&
     !agentList.some((a) => a.id === prefillConfig.agentId);
+  const defaultClaudeAgentId = agentList.find((a) => a.name === "claude-native-ui")?.id;
   const effectiveAgentId =
     pickedAgentId === PENDING_AGENT_ID && pendingAgentAllowedOnTarget
       ? PENDING_AGENT_ID
@@ -2866,7 +2892,7 @@ export function NewChatLandingScreen() {
         ? pickedAgentId
         : configuredAgentUnavailable
           ? null
-          : (agentList[0]?.id ?? null);
+          : (defaultClaudeAgentId ?? agentList[0]?.id ?? null);
   const selectedAgent = useMemo(
     () =>
       effectiveAgentId === PENDING_AGENT_ID && pendingAgent
@@ -3135,23 +3161,19 @@ export function NewChatLandingScreen() {
       setPermissionMode(
         resolve(CLAUDE_NATIVE_PERMISSION_MODES, CLAUDE_NATIVE_DEFAULT_PERMISSION_MODE),
       );
-      // The model + effort picker remembers its own last pick (same per-harness
-      // snapshot the mode knob uses), validated against the current vocab. With
-      // nothing stored (or a retired id) it resolves to "" — unselected, so the
-      // create omits the override and Claude Code uses its own configured model.
       setPickedModel(
-        !storedRoutingOn &&
-          stored.model != null &&
-          claudeModelOptions.some((m) => m.id === stored.model)
-          ? stored.model
-          : "",
+        storedRoutingOn
+          ? ""
+          : "model" in stored
+            ? (claudeModelOptions.find((m) => m.id === stored.model)?.id ?? "")
+            : (landingDraft?.pickedModel ?? "sonnet"),
       );
       setPickedEffort(
-        !storedRoutingOn &&
-          stored.effort != null &&
-          CLAUDE_NATIVE_EFFORTS.some((e) => e.value === stored.effort)
-          ? stored.effort
-          : "",
+        storedRoutingOn
+          ? ""
+          : "effort" in stored
+            ? (CLAUDE_NATIVE_EFFORTS.find((e) => e.value === stored.effort)?.value ?? "")
+            : (landingDraft?.pickedEffort ?? "high"),
       );
     } else if (supportsApprovalMode) {
       setBypassSandbox(
@@ -3336,6 +3358,10 @@ export function NewChatLandingScreen() {
     _setCostControlMode(null);
   }, [info, smartRoutingEnabled, pickedHarness]);
   const workspaceTrimmed = workspace.trim();
+  const setWorkspaceExplicit = useCallback((path: string) => {
+    workspaceWasDefaultedRef.current = false;
+    setWorkspace(path);
+  }, []);
   const workspaceValid = isValidWorkspace(workspace);
   const isCloudHost =
     sandboxSelected || (selectedHost?.name?.toLowerCase().includes("cloud") ?? false);
@@ -3470,6 +3496,7 @@ export function NewChatLandingScreen() {
       if (pickedAgentId === null) setPickedHarness(readLastHarness(writes.agentId));
     }
     if (writes.workspace !== undefined) {
+      workspaceWasDefaultedRef.current = false;
       setWorkspace((cur) => (cur === "" ? writes.workspace! : cur));
     }
     setPrefill(step.state);
@@ -3816,6 +3843,7 @@ export function NewChatLandingScreen() {
     setSelectedHostId(hostId);
     // Workspace is host-specific — clear it and let the seeding effect run for
     // the new host.
+    workspaceWasDefaultedRef.current = false;
     setWorkspace("");
     seededHostRef.current = null;
   }
@@ -3834,6 +3862,7 @@ export function NewChatLandingScreen() {
     // server-chosen, so clear any prior host pick and its workspace.
     setSandboxSelected(true);
     setSelectedHostId(null);
+    workspaceWasDefaultedRef.current = false;
     setWorkspace("");
     seededHostRef.current = null;
   }
@@ -3898,6 +3927,15 @@ export function NewChatLandingScreen() {
     // draft back via returnDraftToUser.
     submittedRef.current = true;
     try {
+      if (!sandboxSelected && selectedHostId && workspaceWasDefaultedRef.current) {
+        try {
+          await createHostDirectory(selectedHostId, workspaceTrimmed);
+        } catch (dirErr: unknown) {
+          if (!(dirErr instanceof Error && dirErr.message === "directory already exists")) {
+            throw dirErr;
+          }
+        }
+      }
       const trimmedBranch = branchName.trim();
       // `shouldCreateWorktree` (component scope): true only when a branch is
       // named and the workspace isn't already an existing worktree. Starting
@@ -4242,9 +4280,13 @@ export function NewChatLandingScreen() {
       // session is created either way and its first message stays held
       // for whenever they open it.
       if (onScreenRef.current) navigate(`/c/${data.id}`);
-    } catch {
+    } catch (err) {
       returnDraftToUser();
-      setCreateError("Couldn't reach the server. Check your connection and try again.");
+      setCreateError(
+        err instanceof Error && err.message
+          ? err.message
+          : "Couldn't reach the server. Check your connection and try again.",
+      );
     } finally {
       setCreating(false);
     }
@@ -5080,7 +5122,7 @@ export function NewChatLandingScreen() {
                         initialPath={
                           isNavigablePath(workspaceTrimmed) ? workspaceTrimmed : undefined
                         }
-                        onNavigate={setWorkspace}
+                        onNavigate={setWorkspaceExplicit}
                         // Warn when browsing into a directory other live agents
                         // occupy. Suppressed only when a NEW isolated worktree
                         // will be created (no shared-dir conflict then). When
@@ -5212,7 +5254,7 @@ export function NewChatLandingScreen() {
                                       // though blur is about to hide the list.
                                       onMouseDown={(e) => {
                                         e.preventDefault();
-                                        setWorkspace(w.path);
+                                        setWorkspaceExplicit(w.path);
                                         setBranchInputFocused(false);
                                         setWorktreePopoverOpen(false);
                                       }}

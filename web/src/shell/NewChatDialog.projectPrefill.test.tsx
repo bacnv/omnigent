@@ -29,6 +29,21 @@ const RECENT_KEY = "omnigent:recent-workspaces";
 const RECENT_WORKSPACE = "/Users/corey/universe/src/foo";
 const REPO = "/Users/corey/projects/alpha";
 
+let mockCurrentUserId: string | null = null;
+let mockHomeListing:
+  | {
+      entries: {
+        name: string;
+        path: string;
+        type: string;
+        bytes: number | null;
+        modified_at: number;
+      }[];
+      truncated: boolean;
+    }
+  | undefined;
+const createHostDirectoryMock = vi.fn<(hostId: string, path: string) => Promise<string>>();
+
 // Mutable so a test can simulate clicking another project's pencil (the
 // screen stays mounted; only the param changes).
 let searchParams = new URLSearchParams("project=Alpha");
@@ -41,7 +56,11 @@ vi.mock("@/store/chatStore", () => ({
   setPendingInitialPrompt: vi.fn(),
 }));
 
-vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
+vi.mock("@/lib/identity", () => ({
+  authenticatedFetch: vi.fn(),
+  getCurrentUserId: () => mockCurrentUserId,
+  resolveIdentity: () => Promise.resolve(null),
+}));
 vi.mock("@/hooks/useHosts", () => ({
   useHosts: vi.fn(),
   useHostModelOptions: vi.fn(() => ({ data: [] })),
@@ -54,7 +73,9 @@ vi.mock("@/hooks/useAvailableAgents", () => ({
   prefetchAvailableAgentDetails: vi.fn(),
 }));
 vi.mock("@/hooks/useHostFilesystem", () => ({
-  useHostFilesystem: () => ({ data: undefined }),
+  useHostFilesystem: () => ({ data: mockHomeListing, isPlaceholderData: false }),
+  createHostDirectory: (...args: unknown[]) =>
+    createHostDirectoryMock(...(args as [string, string])),
   useCreateHostDirectory: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 vi.mock("@/hooks/useHostWorktrees", () => ({
@@ -204,9 +225,10 @@ async function submitAndReadBody(): Promise<Record<string, unknown>> {
 beforeEach(() => {
   navigateMock.mockReset();
   vi.mocked(authenticatedFetch).mockReset();
-  // The landing draft is module-scoped and survives unmount by design; clear it
-  // so a case that never submits can't leak its state into the next test.
-  resetLandingDraft();
+  createHostDirectoryMock.mockReset();
+  createHostDirectoryMock.mockResolvedValue("/home/claude/bacnv");
+  mockCurrentUserId = null;
+  mockHomeListing = undefined;
   searchParams = new URLSearchParams("project=Alpha");
   // The module-scoped landing draft survives unmounts by design; clear it so
   // one test's parked draft can't seed the next one.
@@ -467,20 +489,59 @@ describe("NewChatLandingScreen project prefill", () => {
       "alpha-repo#alpha-main",
     );
 
-    // Click project Beta's pencil: the param changes in place.
     searchParams = new URLSearchParams("project=Beta");
     rerender(<NewChatLandingScreen />);
 
-    // The sticky host pick re-selects the sandbox, but Alpha's staged repo
-    // inputs are gone.
     await waitFor(() =>
       expect(screen.getByTestId("new-chat-landing-repo-chip").textContent).toContain("Repository"),
     );
     const body = await submitAndReadBody();
     expect(body.host_type).toBe("managed");
-    // Blank repo inputs compose to an omitted workspace — not Alpha's
-    // repo#branch.
     expect(body.workspace).toBeUndefined();
+  });
+
+  it("does not create a directory for a project prefill after a generated default", async () => {
+    const BETA_REPO = "/home/claude/project";
+    localStorage.removeItem(RECENT_KEY);
+    mockCurrentUserId = "bacnv";
+    mockHomeListing = {
+      entries: [
+        {
+          name: "projects",
+          path: "/home/claude/projects",
+          type: "directory",
+          bytes: null,
+          modified_at: 0,
+        },
+      ],
+      truncated: false,
+    };
+    vi.mocked(useProjectConfig).mockImplementation((id) => {
+      const data = id === "proj_beta" ? { host_id: "host_1", workspace: BETA_REPO } : {};
+      return { data, isLoading: false } as ReturnType<typeof useProjectConfig>;
+    });
+    const { rerender } = renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("bacnv"),
+    );
+
+    searchParams = new URLSearchParams("project=Beta");
+    rerender(<NewChatLandingScreen />);
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain(
+        "project",
+      ),
+    );
+
+    vi.mocked(authenticatedFetch).mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ id: "conv_new" }),
+    } as Response);
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), { target: { value: "hello" } });
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+    await waitFor(() => expect(vi.mocked(authenticatedFetch)).toHaveBeenCalled());
+
+    expect(createHostDirectoryMock).not.toHaveBeenCalled();
   });
 
   it("reseeds the SAME project after its stored defaults change (edited then re-opened)", async () => {
