@@ -3,6 +3,7 @@
 from omnigent.runner.native.orchestration import (
     _AGY_COLD_START_PORT_POLL_INTERVAL_S,
     _AGY_COLD_START_PORT_TIMEOUT_S,
+    _AUTO_CLAUDE_PERMISSION_REFRESH_TASKS,
     _AUTO_CODEX_APP_SERVERS,
     _AUTO_FORWARDER_CANCEL_TIMEOUT_S,
     _AUTO_FORWARDER_TASKS,
@@ -124,13 +125,16 @@ from omnigent.runner.native.orchestration import (
     _terminal_lookup_miss_reason,
     _terminal_tmux_pane,
     _unwrap_resolved_spec,
+    teardown_all_claude_native_permission_refreshes,
     teardown_all_codex_native_app_servers,
+    teardown_claude_native_permission_refresh,
     teardown_codex_native_app_server,
 )
 
 __all__ = [
     "_AGY_COLD_START_PORT_POLL_INTERVAL_S",
     "_AGY_COLD_START_PORT_TIMEOUT_S",
+    "_AUTO_CLAUDE_PERMISSION_REFRESH_TASKS",
     "_AUTO_CODEX_APP_SERVERS",
     "_AUTO_FORWARDER_CANCEL_TIMEOUT_S",
     "_AUTO_FORWARDER_TASKS",
@@ -252,6 +256,8 @@ __all__ = [
     "_terminal_lookup_miss_reason",
     "_terminal_tmux_pane",
     "_unwrap_resolved_spec",
+    "teardown_all_claude_native_permission_refreshes",
     "teardown_all_codex_native_app_servers",
+    "teardown_claude_native_permission_refresh",
     "teardown_codex_native_app_server",
 ]
