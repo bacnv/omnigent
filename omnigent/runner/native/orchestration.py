@@ -178,7 +178,7 @@ async def _refresh_claude_permission_hook_auth(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Keep a native Claude hook's server auth snapshot fresh."""
-    from omnigent.claude_native_bridge import update_permission_hook_auth_headers
+    from omnigent.harnesses.claude_native.bridge import update_permission_hook_auth_headers
     from omnigent.cli_auth import databricks_request_headers
 
     while True:
