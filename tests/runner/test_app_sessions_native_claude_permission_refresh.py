@@ -67,7 +67,7 @@ async def test_refresh_loop_mints_only_after_sleep_then_restamps(
         return True
 
     monkeypatch.setattr(
-        "omnigent.claude_native_bridge.update_permission_hook_auth_headers", _refresh
+        "omnigent.harnesses.claude_native.bridge.update_permission_hook_auth_headers", _refresh
     )
     monkeypatch.setattr(
         "omnigent.cli_auth.databricks_request_headers",
@@ -128,7 +128,7 @@ async def test_refresh_loop_retries_after_factory_exception(
         return "tok-recovered"
 
     monkeypatch.setattr(
-        "omnigent.claude_native_bridge.update_permission_hook_auth_headers",
+        "omnigent.harnesses.claude_native.bridge.update_permission_hook_auth_headers",
         lambda _dir, headers: rewritten.append(headers["Authorization"]) or True,
     )
 
@@ -159,7 +159,7 @@ async def test_refresh_loop_skips_write_when_factory_returns_none(
     rewritten: list[str] = []
 
     monkeypatch.setattr(
-        "omnigent.claude_native_bridge.update_permission_hook_auth_headers",
+        "omnigent.harnesses.claude_native.bridge.update_permission_hook_auth_headers",
         lambda _dir, headers: rewritten.append(headers["Authorization"]) or True,
     )
 
