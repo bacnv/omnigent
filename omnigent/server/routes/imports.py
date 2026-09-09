@@ -475,7 +475,12 @@ def create_imports_router(
             )
         user_id = require_user(request, auth_provider)
         # Owns-host check + live connection, mirroring the runner-launch path.
-        host = resolve_host_owner(user_id=user_id, host_id=body.host_id, host_store=host_store)
+        host = resolve_host_owner(
+            user_id=user_id,
+            host_id=body.host_id,
+            host_store=host_store,
+            permission_store=permission_store,
+        )
         host_conn = host_registry.get(body.host_id)
         if host_conn is None:
             # A live host absent from THIS replica is a wrong-replica landing, not

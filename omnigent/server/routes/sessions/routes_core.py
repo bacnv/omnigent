@@ -779,6 +779,7 @@ def register_core_routes(
                 spec_cwd=getattr(os_env, "cwd", None) if os_env is not None else None,
                 host_store=getattr(request.app.state, "host_store", None),
                 host_registry=getattr(request.app.state, "host_registry", None),
+                permission_store=permission_store,
             )
             parsed_metadata = parsed_metadata.model_copy(update={"workspace": canonical_workspace})
 
