@@ -279,6 +279,7 @@ def create_scheduled_tasks_router(
                         user_id=user_id,
                         host_id=host_id,
                         host_store=host_store,
+                        permission_store=permission_store,
                     )
             return None, validated_model, validated_effort
         if host_id is None:
