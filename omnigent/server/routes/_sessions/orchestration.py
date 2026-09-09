@@ -10715,6 +10715,7 @@ async def _reject_ungatewayed_model_routing(
     user_id: str | None,
     agent: Agent,
     agent_cache: AgentCache | None,
+    permission_store: PermissionStore | None = None,
 ) -> None:
     """Reject a routing-on create no router can serve.
 
@@ -10751,7 +10752,7 @@ async def _reject_ungatewayed_model_routing(
     # ungatewayed harness the workspace router cannot. Check it before refusing.
     if _oss_routing_available():
         return
-    host = await _routing_host_for_create(body, request, user_id)
+    host = await _routing_host_for_create(body, request, user_id, permission_store)
     if not _ungatewayed_native_harnesses(host, (harness,)):
         return
     raise OmnigentError(_ungatewayed_model_routing_error(harness), code=ErrorCode.INVALID_INPUT)
@@ -10849,6 +10850,7 @@ async def _routing_host_for_create(
     body: SessionCreateInput,
     request: Request,
     user_id: str | None,
+    permission_store: PermissionStore | None = None,
 ) -> Host | None:
     """Resolve the create's target host for routing, authorizing ownership first.
 
@@ -10873,6 +10875,7 @@ async def _routing_host_for_create(
         user_id=user_id,
         host_id=body.host_id,
         host_store=host_store,
+        permission_store=permission_store,
     )
 
 
@@ -11034,6 +11037,7 @@ async def _resolve_fixed_native_model_routing(
     request: Request,
     user_id: str | None,
     harness: str,
+    permission_store: PermissionStore | None = None,
 ) -> tuple[str | None, dict[str, Any] | None, str | None]:
     """Route the model for a create already pinned to one native harness.
 
@@ -11055,7 +11059,7 @@ async def _resolve_fixed_native_model_routing(
     """
     from omnigent.server.smart_routing import models_in_family, route_session_harness
 
-    host = await _routing_host_for_create(body, request, user_id)
+    host = await _routing_host_for_create(body, request, user_id, permission_store)
     # Off the gateway the built-in judge answers, and the static table's
     # ``databricks-*`` ids are unreachable — the host's pre-launch catalog is the
     # only provider-accurate candidate source.
@@ -11086,6 +11090,7 @@ async def _resolve_native_smart_routing(
     body: SessionCreateInput,
     request: Request,
     user_id: str | None,
+    permission_store: PermissionStore | None = None,
 ) -> tuple[str | None, str | None, dict[str, Any] | None, str | None]:
     """Route a top-level Smart Routing create onto a native terminal harness.
 
@@ -11126,7 +11131,7 @@ async def _resolve_native_smart_routing(
         route_session_harness,
     )
 
-    host = await _routing_host_for_create(body, request, user_id)
+    host = await _routing_host_for_create(body, request, user_id, permission_store)
     # Both arms must be gateway-backed before the WORKSPACE router may choose
     # between them: an arm off the gateway cannot run its picks, and the pick is
     # made after the create commits, so there is no safe half-menu. That only
@@ -11286,7 +11291,9 @@ async def _create_session_from_existing_agent(
             _native_routed_model,
             _native_routing_verdict,
             _native_routing_error,
-        ) = await _resolve_native_smart_routing(body, request, user_id)
+        ) = await _resolve_native_smart_routing(
+            body, request, user_id, permission_store
+        )
         if _routed_agent_name is None:
             raise OmnigentError(
                 _native_routing_error
@@ -11311,7 +11318,14 @@ async def _create_session_from_existing_agent(
     # apply, so an explicit request for it is an error rather than a session
     # that silently ignores it. (The auto path checks both arms itself, above.)
     if not _native_smart_routing:
-        await _reject_ungatewayed_model_routing(body, request, user_id, agent, agent_cache)
+        await _reject_ungatewayed_model_routing(
+            body,
+            request,
+            user_id,
+            agent,
+            agent_cache,
+            permission_store,
+        )
 
     # Fixed native harness + Smart Routing on: the harness is the caller's own
     # choice, so only the MODEL is routed — and it has to happen here, since the
@@ -11339,7 +11353,11 @@ async def _create_session_from_existing_agent(
             _fixed_routing_verdict,
             _fixed_routing_error,
         ) = await _resolve_fixed_native_model_routing(
-            body, request, user_id, _fixed_native_harness
+            body,
+            request,
+            user_id,
+            _fixed_native_harness,
+            permission_store,
         )
 
     # Authorize parent_session_id before inheriting anything.
