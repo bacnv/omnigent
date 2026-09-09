@@ -25,7 +25,6 @@ from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import LEVEL_READ, RESERVED_USER_LOCAL, local_single_user_enabled
 from omnigent.server.routes._auth_helpers import require_access
 from omnigent.stores import AgentStore, ConversationStore, PermissionStore
-from omnigent.stores.host_store import host_is_live
 from omnigent.stores.project_store import ProjectStore
 from omnigent.util.reasoning_effort import EFFORT_VALUES, validate_effort
 
@@ -380,10 +379,11 @@ async def _authorize_host_for_workspace(
         the ownership check (minimal test wirings).
     :param host_registry: Live host tunnels on this replica.
     :returns: The host's display name for error messages, or ``None``.
-    :raises OmnigentError: ``WRONG_REPLICA`` when the host is live but
-        its tunnel is on another replica.
+    :raises OmnigentError: ``WRONG_REPLICA`` when a sharded deployment
+        reports the host live on another replica, or ``CONFLICT`` when it
+        is unreachable.
     """
-    from omnigent.server.routes._host_launch import resolve_host_owner
+    from omnigent.server.routes._host_launch import host_absent_error, resolve_host_owner
 
     if host_store is None:
         return None
@@ -394,21 +394,11 @@ async def _authorize_host_for_workspace(
         host_store=host_store,
         permission_store=permission_store,
     )
-    # Wrong-replica classification, same as the /v1/hosts/* endpoints and
-    # RunnerRouter: validate_workspace does a local host_registry miss
-    # → "host is offline" (invalid_input), which the client can't recover
-    # from. If the host is live per the store but its tunnel isn't on this
-    # replica, the create landed on the wrong replica — surface WRONG_REPLICA
-    # so the client re-addresses WITHOUT the key. A genuinely offline host
-    # falls through to the invalid_input case. Both are 400; the distinct
-    # code, not the status, is what tells the client to re-address rather
-    # than give up. Safe to raise here: workspace validation runs BEFORE
-    # create_conversation, so no orphan row is left.
-    if host_registry is not None and host_registry.get(host_id) is None and host_is_live(host):
-        raise OmnigentError(
-            f"host {host.name or host_id!r} is on another replica; retry",
-            code=ErrorCode.WRONG_REPLICA,
-        )
+    # Classify a local tunnel miss before workspace validation turns it into
+    # INVALID_INPUT. This also keeps single-replica misses from entering a
+    # futile WRONG_REPLICA retry loop.
+    if host_registry is not None and host_registry.get(host_id) is None:
+        raise host_absent_error(host)
     return host.name
 
 
