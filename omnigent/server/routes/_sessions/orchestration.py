@@ -8280,9 +8280,7 @@ async def _create_session_from_existing_agent(
             _native_routed_model,
             _native_routing_verdict,
             _native_routing_error,
-        ) = await _resolve_native_smart_routing(
-            body, request, user_id, permission_store
-        )
+        ) = await _resolve_native_smart_routing(body, request, user_id, permission_store)
         if _routed_agent_name is None:
             raise OmnigentError(
                 _native_routing_error
