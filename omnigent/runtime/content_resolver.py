@@ -16,6 +16,13 @@ import logging
 from typing import Any
 
 from omnigent.entities import ConversationItem, MessageData
+from omnigent.runtime.xlsx import (
+    MAX_XLSX_UPLOAD_BYTES,
+    XLSX_MIME,
+    is_xlsx_attachment,
+    xlsx_text_filename,
+    xlsx_to_text,
+)
 from omnigent.stores import ArtifactStore, FileStore
 
 _logger = logging.getLogger(__name__)
@@ -137,13 +144,12 @@ def attachment_upload_limit(content_type: str) -> int | None:
     Max upload size (bytes) for *content_type*, or ``None`` if the type is
     not an allowed attachment.
 
-    Allowed: images, PDF, and text-like files (``text/*`` plus a few
+    Allowed: images, PDF, XLSX, and text-like files (``text/*`` plus a few
     text-bearing ``application/*`` types — JSON, JS, JSONL, notebooks).
-    Office / binary formats (pptx, docx, xlsx, zip, …) return ``None`` and
-    are rejected at upload: the model can't read their raw bytes
-    (Anthropic's base64 ``document`` source accepts only PDF), so inlining
-    them only produces garbled UTF-8 or — for large files — an oversized,
-    context-blowing request. Callers reject ``None`` with HTTP 415.
+    XLSX is converted to bounded TSV text before model consumption. Other
+    Office / binary formats (pptx, docx, xls, zip, …) return ``None`` and are
+    rejected at upload because models cannot reliably consume their raw bytes.
+    Callers reject ``None`` with HTTP 415.
 
     :param content_type: The resolved MIME type, e.g. ``"image/png"``.
         Use :func:`_resolve_content_type` to derive it from the upload's
@@ -156,6 +162,8 @@ def attachment_upload_limit(content_type: str) -> int | None:
         return MAX_IMAGE_UPLOAD_BYTES
     if content_type == "application/pdf":
         return MAX_PDF_UPLOAD_BYTES
+    if content_type == XLSX_MIME:
+        return MAX_XLSX_UPLOAD_BYTES
     if content_type.startswith("text/") or content_type in _TEXT_LIKE_APPLICATION_MIMES:
         return MAX_TEXT_UPLOAD_BYTES
     return None
@@ -334,10 +342,15 @@ def extract_text_attachments(
         ):
             continue
         content_type = _resolve_content_type(file_meta.content_type, file_meta.filename)
-        if not _is_text_like_attachment(content_type, file_meta.filename):
+        if not is_xlsx_attachment(
+            content_type, file_meta.filename
+        ) and not _is_text_like_attachment(content_type, file_meta.filename):
             continue
         try:
             raw = artifact_store.get(file_id)
+            if is_xlsx_attachment(content_type, file_meta.filename):
+                raw = xlsx_to_text(raw)
+                content_type = "text/tab-separated-values"
         except Exception:  # best-effort scan; never break message delivery
             continue
         if not raw:
@@ -520,11 +533,16 @@ def _resolve_file_id_block(
             f"it may have been deleted after the request was accepted"
         )
 
-    # Use cached base64 if available; otherwise fetch, encode, and cache.
+    content_type = _resolve_content_type(file_meta.content_type, file_meta.filename)
+
+    # Use cached base64 if available; otherwise fetch, normalize when needed,
+    # encode, and cache.
     if cache is not None and file_id in cache:
         encoded = cache[file_id]
     else:
         content_bytes = artifact_store.get(file_id)
+        if is_xlsx_attachment(content_type, file_meta.filename):
+            content_bytes = xlsx_to_text(content_bytes)
         encoded = base64.b64encode(content_bytes).decode("ascii")
         if cache is not None:
             cache[file_id] = encoded
@@ -532,7 +550,9 @@ def _resolve_file_id_block(
     # Copy all fields except file_id.
     resolved: dict[str, Any] = {k: v for k, v in block.items() if k != "file_id"}
 
-    content_type = _resolve_content_type(file_meta.content_type, file_meta.filename)
+    if is_xlsx_attachment(content_type, file_meta.filename):
+        content_type = "text/tab-separated-values"
+        resolved["filename"] = xlsx_text_filename(file_meta.filename)
 
     block_type = block.get("type")
     if block_type == "input_image":

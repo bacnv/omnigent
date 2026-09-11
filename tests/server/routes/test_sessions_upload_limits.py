@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import zipfile
 from collections.abc import Iterator
+from io import BytesIO
 
 import pytest
 from fastapi import FastAPI, Request
@@ -85,6 +87,67 @@ def test_upload_rejects_unsupported_type(upload_client: tuple[TestClient, str]) 
     )
     assert resp.status_code == 415, resp.text
     assert "Unsupported attachment type" in resp.text
+
+
+def _xlsx_bytes() -> bytes:
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w") as workbook:
+        workbook.writestr(
+            "xl/workbook.xml",
+            """<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+            </workbook>""",
+        )
+        workbook.writestr(
+            "xl/_rels/workbook.xml.rels",
+            """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                <Relationship Id="rId1" Target="worksheets/sheet1.xml"/>
+            </Relationships>""",
+        )
+        workbook.writestr(
+            "xl/worksheets/sheet1.xml",
+            """<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                <sheetData><row r="1"><c r="A1" t="inlineStr">
+                  <is><t>Hello</t></is>
+                </c></row></sheetData>
+            </worksheet>""",
+        )
+    return output.getvalue()
+
+
+def test_upload_xlsx_succeeds(upload_client: tuple[TestClient, str]) -> None:
+    client, session_id = upload_client
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    resp = client.post(
+        f"/v1/sessions/{session_id}/resources/files",
+        files={"file": ("report.xlsx", _xlsx_bytes(), mime)},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["name"] == "report.xlsx"
+
+
+def test_upload_xlsx_with_generic_mime_succeeds(
+    upload_client: tuple[TestClient, str],
+) -> None:
+    client, session_id = upload_client
+    resp = client.post(
+        f"/v1/sessions/{session_id}/resources/files",
+        files={"file": ("report.xlsx", _xlsx_bytes(), "application/octet-stream")},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["name"] == "report.xlsx"
+
+
+def test_upload_rejects_invalid_xlsx(upload_client: tuple[TestClient, str]) -> None:
+    client, session_id = upload_client
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    resp = client.post(
+        f"/v1/sessions/{session_id}/resources/files",
+        files={"file": ("report.xlsx", b"not a workbook", mime)},
+    )
+    assert resp.status_code == 422, resp.text
+    assert "Invalid XLSX workbook" in resp.text
 
 
 def test_upload_rejects_oversized_image(upload_client: tuple[TestClient, str]) -> None:

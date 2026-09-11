@@ -3416,7 +3416,7 @@ function ComposerImpl({
         ref={fileInputRef}
         type="file"
         multiple
-        accept="image/*,application/pdf,text/*,application/json"
+        accept="image/*,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx,text/*,application/json"
         className="hidden"
         onChange={(e) => {
           if (e.target.files) {

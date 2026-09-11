@@ -940,6 +940,7 @@ def test_resolve_image_file_keeps_specific_mime(
         ("image/jpeg", 5),
         ("image/webp", 5),
         ("application/pdf", 20),
+        ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 10),
         ("text/plain", 10),
         ("text/markdown", 10),
         ("text/x-python", 10),

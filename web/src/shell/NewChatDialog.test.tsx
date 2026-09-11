@@ -3471,6 +3471,18 @@ describe("NewChatLandingScreen attachments", () => {
   // exists. Letting it through means the upload only 415s after the session
   // is created and navigated into — stranding the typed message in a session
   // the user never wanted.
+  it("accepts an XLSX attachment", () => {
+    renderLanding();
+    const xlsx = new File([new Uint8Array(10)], "report.xlsx", {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    });
+    fireEvent.change(screen.getByTestId("new-chat-landing-file-input"), {
+      target: { files: [xlsx] },
+    });
+    expect(screen.getByText("report.xlsx")).toBeTruthy();
+    expect(screen.queryByTestId("new-chat-landing-attachment-error")).toBeNull();
+  });
+
   it("rejects an unsupported attachment instead of attaching it", () => {
     renderLanding();
     const zip = new File([new Uint8Array(10)], "photos.zip", { type: "application/zip" });
@@ -3479,7 +3491,7 @@ describe("NewChatLandingScreen attachments", () => {
     });
     expect(screen.queryByText("photos.zip")).toBeNull();
     expect(screen.getByTestId("new-chat-landing-attachment-error").textContent).toContain(
-      "only images, PDF, and text/code files are supported",
+      "only images, PDF, XLSX, and text/code files are supported",
     );
   });
 
