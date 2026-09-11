@@ -1577,17 +1577,18 @@ def register_resources_routes(
             image_filename_for_content_type,
             image_needs_compression,
         )
+        from omnigent.runtime.xlsx import XLSX_MIME, is_xlsx_filename
 
         # Resolve the type from the declared MIME + filename BEFORE reading
         # the body, so an unsupported or oversized upload is rejected without
-        # buffering it. Attachments are inlined into the model context as
-        # base64 (see content_resolver.resolve_content_references); only
-        # images, PDF, and text/code files are usable — others (pptx, docx,
-        # zip, …) would be garbled or blow the request size, so reject them.
+        # buffering it. XLSX workbooks are normalized to text after the bounded
+        # read; other unsupported Office/binary formats are rejected.
         content_type = _resolve_content_type(
             file.content_type,
             file.filename,
         )
+        if is_xlsx_filename(file.filename):
+            content_type = XLSX_MIME
         type_limit = attachment_upload_limit(content_type)
         if type_limit is None:
             # The browser/OS can mislabel a text/code file as binary (e.g. a
@@ -1603,7 +1604,7 @@ def register_resources_routes(
                 status_code=415,
                 detail=(
                     f"Unsupported attachment type '{content_type}'. Only images, "
-                    "PDF, and text/code files can be attached."
+                    "PDF, XLSX, and text/code files can be attached."
                 ),
             )
         read_limit = min(type_limit, MAX_ATTACHMENT_UPLOAD_BYTES)
@@ -1632,9 +1633,16 @@ def register_resources_routes(
                         filename = image_filename_for_content_type(file.filename, resolved_type)
                     content, content_type = compressed, resolved_type
         else:
-            # PDF/text/SVG and other non-compressed types use their smaller
+            # PDF/text/SVG/XLSX and other non-compressed types use their smaller
             # per-type caps and aren't decoded, so they read outside the gate.
             content = await _read_upload_capped(file, read_limit)
+        if content_type == XLSX_MIME:
+            from omnigent.runtime.xlsx import xlsx_to_text
+
+            try:
+                await asyncio.to_thread(xlsx_to_text, content)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
         stored = file_store.create(
             session_id=session_id,
             filename=filename,

@@ -23,6 +23,7 @@ export const ATTACHMENT_SIZE_LIMITS_MB = {
   image: 50,
   pdf: 20,
   text: 10,
+  xlsx: 10,
 } as const;
 
 // Raster image types the server can compress under the model limit; only these
@@ -48,6 +49,8 @@ export function attachmentKey(file: File): string {
 
 // Text-bearing application/* MIME types (the rest of the text-like surface
 // is text/*). Mirrors _TEXT_LIKE_APPLICATION_MIMES on the server.
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
 const TEXT_LIKE_APPLICATION_MIMES = new Set([
   "application/json",
   "application/javascript",
@@ -135,7 +138,7 @@ function extensionOf(filename: string): string {
 
 /**
  * Classify a file into an attachment category, or `null` if its type is not
- * supported (e.g. pptx, docx, xlsx, zip, binaries). Uses the browser MIME
+ * supported (e.g. pptx, docx, xls, zip, binaries). Uses the browser MIME
  * type first, falling back to the filename extension for code/text files
  * whose MIME is unreliable.
  */
@@ -145,6 +148,7 @@ export function classifyAttachment(file: File): AttachmentCategory | null {
 
   if (type.startsWith("image/")) return "image";
   if (type === "application/pdf" || ext === ".pdf") return "pdf";
+  if (type === XLSX_MIME || ext === ".xlsx") return "xlsx";
   if (
     type.startsWith("text/") ||
     TEXT_LIKE_APPLICATION_MIMES.has(type) ||
@@ -176,7 +180,7 @@ export function validateAttachments(files: File[]): AttachmentValidation {
     const category = classifyAttachment(file);
     if (category === null) {
       errors.push(
-        `"${name}" can't be attached — only images, PDF, and text/code files are supported.`,
+        `"${name}" can't be attached — only images, PDF, XLSX, and text/code files are supported.`,
       );
       continue;
     }

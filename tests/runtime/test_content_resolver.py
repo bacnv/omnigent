@@ -942,6 +942,7 @@ def test_resolve_image_file_keeps_specific_mime(
         ("image/gif", 50),
         ("image/svg+xml", 5),  # non-raster: not compressed, keeps the small cap
         ("application/pdf", 20),
+        ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 10),
         ("text/plain", 10),
         ("text/markdown", 10),
         ("text/x-python", 10),

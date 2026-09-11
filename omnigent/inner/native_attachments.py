@@ -273,8 +273,28 @@ async def resolve_file_id_block(
         content_type = content_resp.headers.get("content-type") or "application/octet-stream"
     # Strip any charset suffix: data URIs need the media type hint.
     content_type = content_type.split(";", 1)[0]
-    encoded = base64.b64encode(content_resp.content).decode("ascii")
+    content = content_resp.content
+    filename = meta.get("name") or meta.get("filename") or block.get("filename")
+    from omnigent.runtime.xlsx import is_xlsx_attachment, xlsx_text_filename, xlsx_to_text
+
+    xlsx_filename = filename if isinstance(filename, str) else None
+    is_xlsx = is_xlsx_attachment(content_type, xlsx_filename)
+    if is_xlsx:
+        try:
+            content = xlsx_to_text(content)
+        except ValueError:
+            _logger.warning(
+                "failed to parse XLSX file_id=%s for session=%s",
+                file_id,
+                session_id,
+                exc_info=True,
+            )
+            return None
+        content_type = "text/plain"
+    encoded = base64.b64encode(content).decode("ascii")
     new_block = {k: v for k, v in block.items() if k != "file_id"}
+    if is_xlsx:
+        new_block["filename"] = xlsx_text_filename(xlsx_filename)
     if block.get("type") == "input_image":
         new_block["image_url"] = f"data:{content_type};base64,{encoded}"
     else:

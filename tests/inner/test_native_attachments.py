@@ -5,8 +5,11 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
+import httpx
 import pytest
 
 from omnigent.inner.native_attachments import (
@@ -16,6 +19,7 @@ from omnigent.inner.native_attachments import (
     attachment_reference_line,
     materialize_attachment,
     parse_data_uri,
+    resolve_file_id_block,
     unresolved_attachment_marker,
 )
 
@@ -269,6 +273,58 @@ def test_materialize_attachment_sanitizes_bracketed_filenames(tmp_path: Path) ->
 
     assert path is not None
     assert path.name == "shot _final_.png"
+
+
+def _xlsx_bytes() -> bytes:
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w") as workbook:
+        workbook.writestr(
+            "xl/workbook.xml",
+            """<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+                <sheets><sheet name="Sheet1" r:id="rId1"/></sheets>
+            </workbook>""",
+        )
+        workbook.writestr(
+            "xl/_rels/workbook.xml.rels",
+            """<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+                <Relationship Id="rId1" Target="worksheets/sheet1.xml"/>
+            </Relationships>""",
+        )
+        workbook.writestr(
+            "xl/worksheets/sheet1.xml",
+            """<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+                <sheetData><row><c r="A1" t="inlineStr"><is><t>Hello</t></is></c></row></sheetData>
+            </worksheet>""",
+        )
+    return output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_resolve_file_id_block_converts_xlsx_to_text() -> None:
+    content = _xlsx_bytes()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/content"):
+            return httpx.Response(
+                200, content=content, headers={"content-type": "application/octet-stream"}
+            )
+        return httpx.Response(200, json={"name": "report.xlsx"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://test"
+    ) as client:
+        resolved = await resolve_file_id_block(
+            {"type": "input_file", "file_id": "file_xlsx", "filename": "report.xlsx"},
+            session_id="session_1",
+            client=client,
+        )
+
+    assert resolved is not None
+    assert resolved["filename"] == "report.xlsx.txt"
+    uri = parse_data_uri(str(resolved["file_data"]))
+    assert uri.mime_type == "text/plain"
+    assert base64.b64decode(uri.base64_payload) == b"Sheet: Sheet1\nHello"
 
 
 def test_attachment_reference_line_covers_both_outcomes(tmp_path: Path) -> None:
