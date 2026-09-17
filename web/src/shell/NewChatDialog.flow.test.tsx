@@ -43,6 +43,20 @@ const PROMPT_HISTORY_KEY = "omnigent:prompt-history:conv_new";
 // The seeded working directory (from the host's persisted recent) that the
 // create body must carry through.
 const SEEDED_WORKSPACE = "/Users/corey/universe/src/foo";
+let mockCurrentUserId: string | null = null;
+let mockHomeListing:
+  | {
+      entries: {
+        name: string;
+        path: string;
+        type: string;
+        bytes: number | null;
+        modified_at: number;
+      }[];
+      truncated: boolean;
+    }
+  | undefined;
+const createHostDirectoryMock = vi.fn<(hostId: string, path: string) => Promise<string>>();
 
 // The landing screen navigates via the embed-aware routing abstraction
 // (`@/lib/routing`), not react-router directly — mock that so the create
@@ -84,8 +98,8 @@ vi.mock("@/lib/sessionUpdatesSocket", () => ({
 
 vi.mock("@/lib/identity", () => ({
   authenticatedFetch: vi.fn(),
-  getCurrentUserId: vi.fn(() => null),
-  resolveIdentity: vi.fn(async () => null),
+  getCurrentUserId: () => mockCurrentUserId,
+  resolveIdentity: async () => null,
 }));
 vi.mock("@/hooks/useHosts", () => ({
   useHosts: vi.fn(),
@@ -103,10 +117,13 @@ vi.mock("@/hooks/useAvailableAgents", () => ({
   useAvailableAgents: vi.fn(),
   prefetchAvailableAgentDetails: vi.fn(),
 }));
-// The home listing is only consulted when there's no recent; the recent is
-// always set here, so keep this inert (returns no listing).
 vi.mock("@/hooks/useHostFilesystem", () => ({
-  useHostFilesystem: () => ({ data: undefined }),
+  useHostFilesystem: () => ({
+    data: mockHomeListing,
+    isPlaceholderData: false,
+  }),
+  createHostDirectory: (...args: unknown[]) =>
+    createHostDirectoryMock(...(args as [string, string])),
   // WorkspacePicker reads this on mount when the file browser opens;
   // an idle mutation keeps it inert for these tests.
   useCreateHostDirectory: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -324,6 +341,10 @@ beforeEach(() => {
   removeLocalConversationMock.mockReturnValue(false);
   pushMatchers.length = 0;
   announcePushedSession = null;
+  createHostDirectoryMock.mockReset();
+  createHostDirectoryMock.mockResolvedValue("/home/claude/bacnv");
+  mockCurrentUserId = null;
+  mockHomeListing = undefined;
   vi.mocked(authenticatedFetch).mockReset();
   // Clear the module-level landing draft so a base branch (or other field)
   // left behind by an unmounting test doesn't seed the next one.
@@ -1527,7 +1548,7 @@ describe("NewChatLandingScreen create flow", () => {
     expect(screen.queryByTestId("new-chat-landing-agy-skip-banner")).toBeNull();
   });
 
-  it("omits model + effort on create when the picker is untouched for claude-native", async () => {
+  it("defaults to Sonnet and high effort on create for claude-native", async () => {
     setAgents([agent({ id: "ag_native", name: "claude-native-ui", display_name: "Claude Code" })]);
     vi.mocked(authenticatedFetch).mockResolvedValueOnce({
       ok: true,
@@ -1536,17 +1557,14 @@ describe("NewChatLandingScreen create flow", () => {
 
     renderLanding();
     await waitForWorkspaceSeed();
-    // No model/effort default is forced: leaving the picker untouched omits
-    // both from the create (undefined is dropped by JSON.stringify), so Claude
-    // Code launches on its own configured model rather than a UI-forced one.
     typeMessage("go");
     fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
 
     await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(1));
     const [, init] = vi.mocked(authenticatedFetch).mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string);
-    expect(body.model_override).toBeUndefined();
-    expect(body.reasoning_effort).toBeUndefined();
+    expect(body.model_override).toBe("sonnet");
+    expect(body.reasoning_effort).toBe("high");
   });
 
   it("rides a picked model + effort along to create for claude-native", async () => {
@@ -2099,6 +2117,128 @@ describe("NewChatLandingScreen create flow", () => {
     // falls back to the source repo's current HEAD.
     const body = JSON.parse(init.body as string);
     expect(body.git).toEqual({ branch_name: "feature/login" });
+  });
+
+  it("creates a generated default directory before the optimistic conversation", async () => {
+    localStorage.removeItem(RECENT_KEY);
+    mockCurrentUserId = "bacnv";
+    mockHomeListing = {
+      entries: [
+        {
+          name: "projects",
+          path: "/home/claude/projects",
+          type: "directory",
+          bytes: null,
+          modified_at: 0,
+        },
+      ],
+      truncated: false,
+    };
+    beginLocalConversationMock.mockReturnValue({
+      tempConvId: "temp:1234567890abcdef1234567890abcdef",
+      pendingMsgTempId: "pend_1",
+      createToken: "1234567890abcdef1234567890abcdef",
+    });
+    vi.mocked(authenticatedFetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("bacnv"),
+    );
+    typeMessage("go");
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+
+    await waitFor(() => expect(vi.mocked(authenticatedFetch)).toHaveBeenCalledTimes(1));
+    expect(createHostDirectoryMock).toHaveBeenCalledWith("host_1", "/home/claude/bacnv");
+    expect(createHostDirectoryMock.mock.invocationCallOrder[0]).toBeLessThan(
+      beginLocalConversationMock.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("preserves generated-directory provenance across a remount", async () => {
+    localStorage.removeItem(RECENT_KEY);
+    mockCurrentUserId = "root";
+    mockHomeListing = {
+      entries: [
+        {
+          name: "projects",
+          path: "/home/claude/projects",
+          type: "directory",
+          bytes: null,
+          modified_at: 0,
+        },
+      ],
+      truncated: false,
+    };
+
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("root"),
+    );
+    cleanup();
+
+    vi.mocked(authenticatedFetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    renderLanding();
+    typeMessage("go");
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+
+    await waitFor(() => expect(vi.mocked(authenticatedFetch)).toHaveBeenCalledTimes(1));
+    expect(createHostDirectoryMock).toHaveBeenCalledWith("host_1", "/home/claude/root");
+  });
+
+  it("does not create a directory for a recent workspace", async () => {
+    vi.mocked(authenticatedFetch).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+
+    renderLanding();
+    await waitForWorkspaceSeed();
+    typeMessage("go");
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+
+    await waitFor(() => expect(vi.mocked(authenticatedFetch)).toHaveBeenCalledTimes(1));
+    expect(createHostDirectoryMock).not.toHaveBeenCalled();
+  });
+
+  it("does not create a session when generated-directory creation fails", async () => {
+    localStorage.removeItem(RECENT_KEY);
+    mockCurrentUserId = "bacnv";
+    mockHomeListing = {
+      entries: [
+        {
+          name: "projects",
+          path: "/home/claude/projects",
+          type: "directory",
+          bytes: null,
+          modified_at: 0,
+        },
+      ],
+      truncated: false,
+    };
+    createHostDirectoryMock.mockRejectedValueOnce(new Error("permission denied"));
+
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-workspace-chip").textContent).toContain("bacnv"),
+    );
+    typeMessage("go");
+    fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-error").textContent).toContain(
+        "permission denied",
+      ),
+    );
+    expect(vi.mocked(authenticatedFetch)).not.toHaveBeenCalled();
+    expect(beginLocalConversationMock).not.toHaveBeenCalled();
+    expect(navigateMock).not.toHaveBeenCalled();
   });
 
   it("surfaces the server's reason and does not navigate on a failed create", async () => {
