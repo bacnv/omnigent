@@ -99,6 +99,15 @@ def test_upload_rejects_undecodable_oversized_image(
     """
     from omnigent.runtime.content_resolver import IMAGE_MODEL_BUDGET_BYTES
 
+    client, session_id = upload_client
+    oversized = b"\x00" * (IMAGE_MODEL_BUDGET_BYTES + 1)
+    resp = client.post(
+        f"/v1/sessions/{session_id}/resources/files",
+        files={"file": ("huge.png", oversized, "image/png")},
+    )
+    assert resp.status_code == 413, resp.status_code
+
+
 def _xlsx_bytes() -> bytes:
     output = BytesIO()
     with zipfile.ZipFile(output, "w") as workbook:
@@ -158,15 +167,6 @@ def test_upload_rejects_invalid_xlsx(upload_client: tuple[TestClient, str]) -> N
     )
     assert resp.status_code == 422, resp.text
     assert "Invalid XLSX workbook" in resp.text
-
-
-    client, session_id = upload_client
-    oversized = b"\x00" * (IMAGE_MODEL_BUDGET_BYTES + 1)
-    resp = client.post(
-        f"/v1/sessions/{session_id}/resources/files",
-        files={"file": ("huge.png", oversized, "image/png")},
-    )
-    assert resp.status_code == 413, resp.status_code
 
 
 def test_upload_large_image_is_compressed_under_budget(
