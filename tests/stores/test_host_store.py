@@ -17,6 +17,7 @@ from omnigent.stores.host_store import (
     HOST_LIVENESS_TTL_S,
     Host,
     HostStore,
+    hash_host_launch_token,
     host_is_live,
 )
 
@@ -1598,3 +1599,83 @@ def test_replace_managed_host_sandbox_refuses_cross_owner(db_uri: str) -> None:
     assert resolved.sandbox_id == "sb-m7"
     # Bob's token never armed Alice's host: it does not match the stored digest.
     assert store.resolve_launch_token("58f80f7592c6a72ba121eb5aedde8a82", "bob-token-7") is None
+
+
+def test_external_host_reconnects_without_a_sandbox(db_uri: str) -> None:
+    """
+    An external host presenting a launch token reconnects without ever
+    having a sandbox generation.
+
+    A physical machine (a laptop, this repo's own runner) is registered
+    through the external-host path, which leaves ``sandbox_provider`` and
+    ``sandbox_id`` NULL. Its credential is armed out of band, so the
+    managed-token branch of ``upsert_on_connect`` is what revalidates it.
+    Requiring ``sandbox_id`` there rejects every such host with a
+    misleading "token is no longer valid" and a silent reconnect loop,
+    even though the token is correct and unexpired.
+    """
+    store = HostStore(db_uri)
+    host_id = "c0ffee1234567890abcdef1234567890"
+    token = "external-host-token"
+    store.upsert_on_connect(host_id=host_id, name="laptop", user_id="alice@example.com")
+    with Session(get_or_create_engine(db_uri)) as session:
+        session.execute(
+            update(SqlHost)
+            .where(SqlHost.host_id == host_id)
+            .values(
+                token_hash=hash_host_launch_token(token),
+                token_expires_at=now_epoch() + 3600,
+            )
+        )
+        session.commit()
+
+    connected = store.upsert_on_connect(
+        host_id=host_id,
+        name="laptop",
+        user_id="alice@example.com",
+        managed_token=token,
+    )
+
+    assert connected.status == "online"
+    assert connected.sandbox_provider is None
+    assert connected.sandbox_id is None
+    # The credential still resolves after the reconnect.
+    assert store.resolve_launch_token(host_id, token) is not None
+
+
+def test_managed_host_without_sandbox_still_refuses_to_reconnect(db_uri: str) -> None:
+    """
+    The relaxed predicate must not weaken the managed host's generation
+    check: a row detached from its sandbox is mid-cleanup, and its token
+    must not re-register the host.
+
+    Without this, a host whose sandbox was reaped could resurrect itself
+    on the stale credential and be reported online with no backing
+    sandbox — the opposite of what ``detach_stale_managed_sandbox`` is
+    for.
+    """
+    store = HostStore(db_uri)
+    host_id = "deadbeef1234567890abcdef12345678"
+    registered = store.register_managed_host(
+        host_id=host_id,
+        name="managed-detached",
+        user_id="alice@example.com",
+        token="detached-token",
+        provider="modal",
+        sandbox_id="sb-detached",
+        token_expires_at=now_epoch() + 3600,
+    )
+    assert registered.sandbox_provider == "modal"
+    assert store.detach_stale_managed_sandbox(
+        host_id,
+        sandbox_id="sb-detached",
+        expected_updated_at=registered.updated_at,
+    )
+
+    with pytest.raises(ValueError, match="no longer valid"):
+        store.upsert_on_connect(
+            host_id=host_id,
+            name="managed-detached",
+            user_id="alice@example.com",
+            managed_token="detached-token",
+        )
