@@ -3018,6 +3018,38 @@ def test_populate_codex_home_config_minimal_mode_keeps_only_provider_routing(
     assert "marketplaces" not in config_text
 
 
+def test_populate_codex_home_config_minimal_mode_keeps_the_catalog_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Minimal mode carries ``model_catalog_json``, or the picker goes blind.
+
+    ``model_catalog_json`` REPLACES codex's bundled catalog rather than
+    merging into it, so a probe home without the key answers with codex's own
+    arms — and a session picker built from that answer hides every model the
+    user added to their own catalog.
+    """
+    from omnigent.inner.codex_executor import _populate_codex_home_config
+
+    source = tmp_path / "real_codex_home"
+    source.mkdir()
+    (source / "auth.json").write_text('{"auth_mode": "chatgpt"}')
+    (source / "config.toml").write_text(
+        'model_catalog_json = "/home/u/.codex/model-catalog.json"\n'
+        'model_provider = "Databricks"\n'
+        '[model_providers.Databricks]\nname = "Databricks"\nbase_url = "https://example"\n'
+    )
+    target = tmp_path / "temp_codex_home"
+    target.mkdir()
+    monkeypatch.setenv("HARNESS_CODEX_MINIMAL_CONFIG", "1")
+
+    _populate_codex_home_config(target, source)
+
+    config_text = (target / "config.toml").read_text()
+    assert 'model_catalog_json = "/home/u/.codex/model-catalog.json"' in config_text
+    assert 'model_provider = "Databricks"' in config_text
+
+
 def test_populate_codex_home_config_config_toml_copy_is_isolated(tmp_path: Path) -> None:
     """Writing to the session's ``config.toml`` copy does not affect the source.
 

@@ -944,9 +944,18 @@ def _populate_codex_home_config(
             # The title worker needs custom-provider routing, but copying the
             # full user config also starts unrelated MCPs/plugins and can exceed
             # its timeout. auth.json alone cannot supply these provider tables.
+            # ``model_catalog_json`` rides along: codex REPLACES its bundled
+            # catalog with that file rather than merging into it, so a home
+            # without the key answers ``model/list`` with codex's own arms and
+            # every model the user added to their catalog goes unlisted.
             source_config = tomlkit.parse(source_file.read_text())
             minimal_document = tomlkit.document()
-            for key in ("model_provider", "model_providers", "profiles"):
+            for key in (
+                "model_provider",
+                "model_providers",
+                "profiles",
+                "model_catalog_json",
+            ):
                 if key in source_config:
                     minimal_document[key] = source_config[key]
             dest_path.write_text(tomlkit.dumps(minimal_document))
