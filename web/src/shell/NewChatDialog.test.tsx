@@ -51,6 +51,7 @@ import {
   matchSkillInvocation,
   normalizeWorkspacePath,
   resolveThisMachineHostId,
+  defaultUserWorkspace,
   sessionsSharingDirectory,
   worktreePathTail,
   NewChatLandingScreen,
@@ -218,6 +219,9 @@ vi.mock("@/hooks/useAvailableAgents", () => ({
 vi.mock("@/lib/agentsApi", () => ({ installAgentBundle: vi.fn() }));
 vi.mock("@/hooks/useHostFilesystem", () => ({
   useHostFilesystem: vi.fn(),
+  // The landing screen creates a generated per-user workspace before the
+  // optimistic conversation; tests that exercise it override this.
+  createHostDirectory: vi.fn(async () => "/created"),
   // WorkspacePicker (rendered by the file browser) reads this on mount;
   // an idle mutation keeps it inert for these tests.
   useCreateHostDirectory: vi.fn(() => ({ mutateAsync: vi.fn(), isPending: false })),
@@ -490,6 +494,39 @@ describe("resolveThisMachineHostId", () => {
     expect(resolveThisMachineHostId(null, true, ["host_online"])).toBe("host_online");
     expect(resolveThisMachineHostId(null, true, ["host_a", "host_b"])).toBeNull();
     expect(resolveThisMachineHostId(null, false, ["host_online"])).toBeNull();
+  });
+});
+
+describe("defaultUserWorkspace", () => {
+  it.each([
+    ["/home/claude", "bacnv", "/home/claude/bacnv"],
+    ["/root", "bacnv", "/root/bacnv"],
+    ["/", "bacnv", "/bacnv"],
+    ["/home/claude/", "bacnv", "/home/claude/bacnv"],
+  ])("builds the default workspace for %s + %s", (home, user, expected) => {
+    expect(defaultUserWorkspace(home, user)).toBe(expected);
+  });
+
+  // The username becomes a path component, so anything that could escape the
+  // home directory (or that isn't the identity verbatim) must be refused.
+  it.each([
+    "",
+    ".",
+    "..",
+    "../escape",
+    "/absolute",
+    "a/b",
+    "a\\b",
+    " alice ",
+    "Alice",
+    "bac.nv",
+    "bac@nv",
+  ])("rejects unsafe username %j", (user) => {
+    expect(defaultUserWorkspace("/home/claude", user)).toBeNull();
+  });
+
+  it.each(["", " ", "  "])("returns null for blank home %j", (home) => {
+    expect(defaultUserWorkspace(home, "bacnv")).toBeNull();
   });
 });
 
@@ -1373,11 +1410,11 @@ describe("model picker hotkey", () => {
     expect(await screen.findByTestId("new-chat-landing-agent-models")).toBeVisible();
     const selectedModel = within(screen.getByTestId("new-chat-landing-agent-models")).getByRole(
       "menuitemcheckbox",
-      { name: "Default" },
+      { name: "Sonnet 4.6" },
     );
     await waitFor(() => expect(selectedModel).toHaveFocus());
     await user.keyboard("{ArrowDown}");
-    const nextModel = screen.getByRole("menuitemcheckbox", { name: "Opus 4.8" });
+    const nextModel = screen.getByRole("menuitemcheckbox", { name: "Haiku 4.5" });
     expect(nextModel).toHaveFocus();
 
     // Focus remains where the user moved it, and the shortcut works again
@@ -1395,7 +1432,7 @@ describe("model picker hotkey", () => {
     await waitFor(() =>
       expect(
         within(screen.getByTestId("new-chat-landing-agent-models")).getByRole("menuitemcheckbox", {
-          name: "Default",
+          name: "Sonnet 4.6",
         }),
       ).toHaveFocus(),
     );
@@ -1609,6 +1646,26 @@ describe("NewChatLandingScreen initial picker loading", () => {
     expect(screen.getByTestId("new-chat-landing-input")).toBeEnabled();
     return screen.getByTestId("new-chat-landing-agent-select");
   }
+
+  it("prefers Claude Code for a fresh selection even when another agent sorts first", () => {
+    mockAgents([
+      {
+        id: "a_other",
+        name: "custom-native",
+        display_name: "Custom Native",
+        description: null,
+        harness: "claude-native",
+        skills: [],
+      },
+      ...DEFAULT_LANDING_AGENTS,
+    ]);
+
+    renderLanding();
+
+    expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
+      "Claude Code, Model Sonnet 4.6, Effort High",
+    );
+  });
 
   it("keeps one placeholder through agents, host selection, models, and saved preference seeding", async () => {
     localStorage.setItem(LAST_AGENT_KEY, "a1");
@@ -3898,7 +3955,7 @@ describe("NewChatLandingScreen", () => {
     ]);
     renderLanding();
     const picker = screen.getByTestId("new-chat-landing-agent-select");
-    expect(picker).toHaveAccessibleName("Claude Code, Model Opus");
+    expect(picker).toHaveAccessibleName("Claude Code, Model Opus, Effort High");
     fireEvent.pointerDown(picker, { button: 0 });
     const summary = screen.getByTestId("new-chat-landing-agent-summary-a1");
     expect(summary).toHaveTextContent("Opus");
@@ -3953,15 +4010,15 @@ describe("NewChatLandingScreen", () => {
     const picker = screen.getByTestId("new-chat-landing-agent-select");
     expect(picker).not.toHaveTextContent("Claude Code");
     expect(picker).not.toHaveTextContent("Default");
-    expect(picker).toHaveAccessibleName("Claude Code, Model Opus 4.8");
+    expect(picker).toHaveAccessibleName("Claude Code, Model Sonnet 4.6, Effort High");
     // The hover summary is a styled tooltip with bold keys, never the
     // unstyled native `title` hover.
     expect(picker).not.toHaveAttribute("title");
     fireEvent.focus(picker);
     const pickerTooltip = await screen.findByTestId("new-chat-landing-agent-tooltip");
     expect(pickerTooltip).toHaveTextContent("Harness: Claude Code");
-    expect(pickerTooltip).toHaveTextContent("Model: Default (Opus 4.8)");
-    expect(pickerTooltip).not.toHaveTextContent("Effort:");
+    expect(pickerTooltip).toHaveTextContent("Model: Sonnet 4.6");
+    expect(pickerTooltip).toHaveTextContent("Effort: High");
     for (const key of within(pickerTooltip).getAllByText(/^(Harness|Model|Effort):$/)) {
       expect(key).toHaveClass("font-semibold");
     }
@@ -3981,7 +4038,9 @@ describe("NewChatLandingScreen", () => {
       "items-baseline",
       "gap-1",
     );
-    expect(screen.getByTestId("new-chat-landing-agent-model-value")).toHaveTextContent("Opus 4.8");
+    expect(screen.getByTestId("new-chat-landing-agent-model-value")).toHaveTextContent(
+      "Sonnet 4.6",
+    );
     expect(screen.getByTestId("new-chat-landing-agent-model-value")).toHaveClass(
       "min-w-0",
       "truncate",
@@ -3991,7 +4050,7 @@ describe("NewChatLandingScreen", () => {
       "text-foreground",
     );
     expect(screen.queryByTestId("new-chat-landing-config-gear")).toBeNull();
-    expect(screen.queryByTestId("new-chat-landing-agent-effort-value")).toBeNull();
+    expect(screen.getByTestId("new-chat-landing-agent-effort-value")).toHaveTextContent("High");
 
     fireEvent.pointerDown(picker, { button: 0 });
     const [rootMenu] = screen.getAllByRole("menu");
@@ -4022,7 +4081,7 @@ describe("NewChatLandingScreen", () => {
 
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-effort-high"));
     expect(screen.getByTestId("new-chat-landing-agent-config-value")).toHaveTextContent(
-      "Opus 4.8High",
+      "Sonnet 4.6High",
     );
     expect(screen.getByTestId("new-chat-landing-agent-effort-value")).toHaveTextContent("High");
     expect(screen.getByTestId("new-chat-landing-agent-effort-value")).toHaveClass(
@@ -4033,7 +4092,7 @@ describe("NewChatLandingScreen", () => {
       "text-muted-foreground",
     );
     expect(screen.getByTestId("new-chat-landing-agent-effort-value")).not.toHaveClass("hidden");
-    expect(picker).toHaveAccessibleName("Claude Code, Model Opus 4.8, Effort High");
+    expect(picker).toHaveAccessibleName("Claude Code, Model Sonnet 4.6, Effort High");
   });
 
   it.each([
@@ -4827,9 +4886,9 @@ describe("NewChatLandingScreen", () => {
 
     const picker = screen.getByTestId("new-chat-landing-agent-select");
     expect(within(picker).getByTestId("new-chat-landing-agent-model-value")).toHaveTextContent(
-      "Default",
+      "Sonnet 4.6",
     );
-    expect(picker).toHaveAccessibleName("Claude Code, Model Default");
+    expect(picker).toHaveAccessibleName("Claude Code, Model Sonnet 4.6, Effort High");
 
     selectAgent("a2");
     expect(picker).toHaveAccessibleName("Codex, Model GPT-5.5");
@@ -5780,10 +5839,10 @@ describe("NewChatLandingScreen", () => {
     pickPrimaryOption("effort", "High");
     closePrimaryPicker();
 
-    // Claude's row reopens on its own remembered effort (nothing stored →
-    // Default) — the Codex pick must not ride the shared state across.
+    // Claude's row reopens on its own fresh High default — the Codex pick must
+    // not ride the shared state across.
     openAgentModels("a1");
-    expect(selectedPickerEffort().textContent).toContain("Default");
+    expect(selectedPickerEffort().textContent).toContain("High");
     closePrimaryPicker();
 
     // Codex reopens on the remembered pick, still valid for its ladder.
@@ -5805,9 +5864,9 @@ describe("NewChatLandingScreen", () => {
     closePrimaryPicker();
 
     // The Codex model is remembered under codex-native only; Claude Code's
-    // picker should reopen on its own Default instead of inheriting the GPT id.
+    // picker should reopen on its own fresh Sonnet default, not inherit the GPT id.
     openAgentModels("a1");
-    expect(selectedPickerModel().textContent).toContain("Default");
+    expect(selectedPickerModel().textContent).toContain("Sonnet 4.6");
     expect(selectedPickerModel().textContent).not.toContain("GPT-5.6");
     closePrimaryPicker();
 
@@ -8667,7 +8726,9 @@ describe("NewChatLandingScreen agent picker + Edit settings", () => {
   it("summarizes the current settings across the integrated controls", () => {
     renderLanding();
     pickPermissionOption("plan");
-    expect(screen.getByTestId("new-chat-landing-agent-model-value")).toHaveTextContent("Default");
+    expect(screen.getByTestId("new-chat-landing-agent-model-value")).toHaveTextContent(
+      "Sonnet 4.6",
+    );
     expect(screen.getByTestId("new-chat-landing-permission-chip")).toHaveTextContent("Plan");
   });
 
@@ -8690,8 +8751,8 @@ describe("NewChatLandingScreen agent picker + Edit settings", () => {
     fireEvent.focus(picker);
     const pickerTooltip = await screen.findByTestId("new-chat-landing-agent-tooltip");
     expect(pickerTooltip).toHaveTextContent("Harness: Claude Code");
-    expect(pickerTooltip).toHaveTextContent("Model: Default");
-    expect(pickerTooltip).not.toHaveTextContent("Effort:");
+    expect(pickerTooltip).toHaveTextContent("Model: Sonnet 4.6");
+    expect(pickerTooltip).toHaveTextContent("Effort: High");
     expect(pickerTooltip).toHaveTextContent("Connection: Claude subscription");
     fireEvent.blur(picker);
   });
@@ -9373,10 +9434,10 @@ describe("NewChatLandingScreen smart routing", () => {
     openAgentModels("a2");
     expect(selectedPickerModel().textContent).toContain("Smart Routing");
     closePrimaryPicker();
-    // Claude Code never had routing picked, so it stays on Default.
+    // Claude Code never had routing picked, so it stays on its fresh Sonnet default.
     openAgentModels("a1");
     const model = selectedPickerModel();
-    expect(model.textContent).toContain("Default");
+    expect(model.textContent).toContain("Sonnet 4.6");
     expect(model.textContent).not.toContain("Smart Routing");
   });
 
@@ -10028,7 +10089,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
       expect(chip).toHaveAccessibleName(
         configured?.["claude-native"] === false
           ? "Codex, Model GPT-5.5"
-          : "Claude Code, Model Default",
+          : "Claude Code, Model Sonnet 4.6, Effort High",
       );
       expect(screen.queryByTestId("new-chat-landing-smart-routing-dropped")).toBeNull();
       openPicker();
@@ -10170,7 +10231,7 @@ describe("NewChatLandingScreen Smart Routing harness row", () => {
 
     remountLanding({ smart_routing_enabled: true });
     expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
-      "Claude Code, Model Default",
+      "Claude Code, Model Sonnet 4.6, Effort High",
     );
   });
 
