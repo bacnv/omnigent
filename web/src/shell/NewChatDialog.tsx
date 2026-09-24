@@ -267,7 +267,11 @@ import { useRecentHarnesses } from "@/hooks/useRecentHarnesses";
 import { useRecentWorkspaces } from "@/hooks/useRecentWorkspaces";
 import { useDirectorySessions } from "@/hooks/useDirectorySessions";
 import { useRunnerHealthRegistration } from "@/hooks/RunnerHealthProvider";
-import { useHostFilesystem, type HostFilesystemEntry } from "@/hooks/useHostFilesystem";
+import {
+  createHostDirectory,
+  useHostFilesystem,
+  type HostFilesystemEntry,
+} from "@/hooks/useHostFilesystem";
 import {
   useHostWorktrees,
   useVerifiedGitWorktrees,
@@ -1234,6 +1238,14 @@ export function matchSkillInvocation(
  * @param entries Entries from listing the host's home directory.
  * @returns The home directory path, or ``null`` when it can't be derived.
  */
+export function defaultUserWorkspace(home: string, username: string): string | null {
+  if (!home.trim()) return null;
+  const base = home === "/" ? "" : home.replace(/\/+$/, "");
+  const user = username.trim();
+  if (user !== username || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(user)) return null;
+  return `${base}/${user}`;
+}
+
 export function deriveHomeDir(entries: HostFilesystemEntry[]): string | null {
   const first = entries[0];
   if (!first) return null;
@@ -2053,6 +2065,7 @@ interface LandingDraft {
   sandboxProvider: string | null;
   sandboxRepoSelections: LastSandboxRepo[];
   workspace: string;
+  workspaceWasDefaulted: boolean;
   branchName: string;
   autoSeededBranch: string;
   permissionMode: string;
@@ -2106,19 +2119,22 @@ export function NewChatLandingScreen() {
   // Project driving this visit, when the sidebar's per-project "new session"
   // pencil landed here with a `?project=` query param. Empty otherwise.
   const projectParam = searchParams.get("project") ?? "";
-  const [cacheUser, setCacheUser] = useState(getCurrentUserId);
+  const [currentUserId, setCurrentUserId] = useState<string | null | undefined>(
+    () => getCurrentUserId() ?? undefined,
+  );
   useEffect(() => {
-    if (cacheUser !== null) return;
+    if (currentUserId !== undefined) return;
     let cancelled = false;
     // Share the boot identity probe; never read another account's preview.
     void resolveIdentity().then((user) => {
-      if (!cancelled) setCacheUser(user);
+      if (!cancelled) setCurrentUserId(user);
     });
     return () => {
       cancelled = true;
     };
-  }, [cacheUser]);
-  const pickerCacheKey = getNewChatPickerCacheKey(projectParam, cacheUser);
+  }, [currentUserId]);
+  const resolvedUserId = currentUserId === undefined ? null : currentUserId;
+  const pickerCacheKey = getNewChatPickerCacheKey(projectParam, resolvedUserId);
   // Snapshot once per scope: editing a cached menu changes the saved preferences.
   const cachedPickerOptions = useMemo(
     () => readNewChatPickerOptionsCache(pickerCacheKey),
@@ -2478,6 +2494,7 @@ export function NewChatLandingScreen() {
   // exact config value counts as explicit and is SENT with the create.
   const agentFromConfigRef = useRef<boolean>(restoredDraft?.agentFromConfig ?? false);
   const workspaceFromConfigRef = useRef<boolean>(restoredDraft?.workspaceFromConfig ?? false);
+  const workspaceWasDefaultedRef = useRef<boolean>(restoredDraft?.workspaceWasDefaulted ?? false);
   const [branchName, setBranchName] = useState<string>(() => restoredDraft?.branchName ?? "");
   // Branch the worktree-default effect auto-seeded (empty = none), so it can
   // retract its own seed when the default turns off. In the preserved draft so
@@ -2635,6 +2652,7 @@ export function NewChatLandingScreen() {
     costControlMode,
     agentFromConfig: agentFromConfigRef.current,
     workspaceFromConfig: workspaceFromConfigRef.current,
+    workspaceWasDefaulted: workspaceWasDefaultedRef.current,
   };
   useEffect(() => {
     // Re-set on setup so StrictMode's setup→cleanup→setup double-invoke
@@ -2760,6 +2778,7 @@ export function NewChatLandingScreen() {
     setPendingRepoUrl("");
     agentFromConfigRef.current = false;
     workspaceFromConfigRef.current = false;
+    workspaceWasDefaultedRef.current = false;
     seededHostRef.current = null;
     worktreeSeededForRef.current = null;
     setPickerEdits(null);
@@ -2872,10 +2891,16 @@ export function NewChatLandingScreen() {
   // falls through to the global one, then to blank (fork from current branch).
   const projectBaseBranch = storedProjectConfig?.base_branch?.trim() || null;
 
-  // The path the once-per-host auto-seed WOULD land on: the most-recent path,
-  // else the derived home. Exposed as a memo so we can probe its repo for
-  // worktrees before committing to it (see the fork-fresh redirect below).
-  const autoSeedCandidate = useMemo(() => recent[0] ?? derivedHome ?? null, [recent, derivedHome]);
+  // Fork-fresh applies only to an existing recent workspace. A generated
+  // per-user fallback may not exist yet and is intentionally a plain workspace.
+  const userDir = useMemo(
+    () => (derivedHome == null ? null : defaultUserWorkspace(derivedHome, currentUserId ?? "")),
+    [derivedHome, currentUserId],
+  );
+  // The path the once-per-host auto-seed WOULD land on, exposed as a memo so we
+  // can probe its repo for worktrees before committing to it (see the
+  // fork-fresh redirect below).
+  const autoSeedCandidate = useMemo(() => recent[0] ?? null, [recent]);
   // "Fork fresh from default": when the project defines a default base branch,
   // a fresh new-chat must NOT silently continue in the last-used worktree — it
   // should fork a new branch off that default. The auto-seed can land on a
@@ -2925,27 +2950,29 @@ export function NewChatLandingScreen() {
     autoSeedCandidate,
   ]);
 
-  // Seed the working directory once per host, into an empty field only, so an
-  // explicit pick isn't clobbered. Prefer the most-recent path; else the
-  // derived home (which can arrive a render later, hence the dep). Holds
-  // off while a project prefill is deciding on a workspace of its own.
+  // Seed once per host without replacing project or explicit choices:
+  // recent workspace, else a safely generated <home>/<user>, else home.
   useEffect(() => {
-    if (!prefillSettled) return;
-    if (selectedHostId === null) return;
+    if (!prefillSettled || sandboxSelected || selectedHostId === null) return;
     if (seededHostRef.current === selectedHostId) return;
-    if (autoSeedCandidate === null) return;
+    // Wait for identity before choosing the generated fallback, so a pending
+    // probe can't seed the bare home and lock the once-per-host guard.
+    if (recent[0] == null && currentUserId === undefined) return;
     // Fork-fresh redirect pending: wait for the probe rather than seeding the
     // wrong path (and locking the once-per-host guard).
     if (forkFreshMainPath === undefined) return;
 
     const didForkFresh = forkFreshMainPath !== null;
-    const candidate = didForkFresh ? forkFreshMainPath : autoSeedCandidate;
+    const candidate = didForkFresh ? forkFreshMainPath : (recent[0] ?? userDir ?? derivedHome);
+    if (!candidate) return;
     seededHostRef.current = selectedHostId;
     // Seed into an empty field only, so a config-supplied (or explicitly
     // picked) workspace isn't clobbered.
     const seededWorkspace = workspace === "";
     if (seededWorkspace) {
       workspaceFromConfigRef.current = false;
+      workspaceWasDefaultedRef.current =
+        !didForkFresh && recent[0] == null && candidate === userDir;
       setWorkspace(candidate);
     }
     // Fork fresh only when we actually seeded the redirect AND no branch is set
@@ -2964,8 +2991,12 @@ export function NewChatLandingScreen() {
     }
   }, [
     selectedHostId,
-    autoSeedCandidate,
+    recent,
+    userDir,
+    derivedHome,
+    currentUserId,
     prefillSettled,
+    sandboxSelected,
     forkFreshMainPath,
     workspace,
     branchName,
@@ -3021,6 +3052,7 @@ export function NewChatLandingScreen() {
     rememberedHarnessResolution.source === "fallback"
       ? rememberedHarnessResolution
       : null;
+  const defaultClaudeAgentId = agentList.find((a) => a.name === "claude-native-ui")?.id;
   const defaultEffectiveAgentId =
     pickedAgentId === PENDING_AGENT_ID && pendingAgentAllowedOnTarget
       ? PENDING_AGENT_ID
@@ -3031,7 +3063,7 @@ export function NewChatLandingScreen() {
           : (agentsLoading || prefillConfig === undefined) &&
               agentList.some((agent) => agent.id === cachedPickerOptions?.agent.id)
             ? cachedPickerOptions!.agent.id
-            : (agentList[0]?.id ?? null);
+            : (defaultClaudeAgentId ?? agentList[0]?.id ?? null);
   const effectiveAgentId = automaticHarnessFallback?.candidate?.value.id ?? defaultEffectiveAgentId;
   const selectedAgent = useMemo(
     () =>
@@ -3141,7 +3173,7 @@ export function NewChatLandingScreen() {
     previewSandboxProvider,
     previewHarness,
     effectiveAgentId,
-    cacheUser,
+    resolvedUserId,
     sandboxPreviewEnabled,
   );
   const sandboxInferenceConfigured =
@@ -3311,10 +3343,14 @@ export function NewChatLandingScreen() {
           : (claudeModelOptions.find((m) => m.id === pickedModel)?.displayName ??
               defaultModelLabel(claudeModelOptions)),
       );
-      // Routing owns effort per turn, so the summary shows an em-dash.
+      // Routing owns effort per turn, so the summary shows an em-dash. An
+      // effort only rides a resolved model pick: with the catalog still empty
+      // there is nothing to attach it to, so the row stays off.
       const effortValue = routingOn
         ? EFFORT_UNAVAILABLE_PLACEHOLDER
-        : normalizeEffortLabel(pickedEffort);
+        : pickedModel
+          ? normalizeEffortLabel(pickedEffort)
+          : "";
       const permissionValue =
         CLAUDE_NATIVE_PERMISSION_MODES.find((m) => m.value === permissionMode)?.label ??
         permissionMode;
@@ -4067,23 +4103,25 @@ export function NewChatLandingScreen() {
         resolve(CLAUDE_NATIVE_PERMISSION_MODES, CLAUDE_NATIVE_DEFAULT_PERMISSION_MODE),
       );
       // The model + effort picker remembers its own last pick (same per-harness
-      // snapshot the mode knob uses), validated against the current vocab. With
-      // nothing stored (or a retired id) it resolves to "" — unselected, so the
-      // create omits the override and Claude Code uses its own configured model.
+      // snapshot the mode knob uses), validated against the current vocab. A
+      // genuinely fresh Claude chat — nothing stored for this harness and no
+      // carried draft — starts on Sonnet at high effort. An explicitly stored
+      // value, including a stored empty "", still wins, so a user who chose the
+      // harness default keeps it.
       setPickedModel(
         projectSeed(claudeModelOptions) ??
-          (!storedRoutingOn &&
-          stored.model != null &&
-          claudeModelOptions.some((m) => m.id === stored.model)
-            ? stored.model
-            : ""),
+          (storedRoutingOn
+            ? ""
+            : "model" in stored
+              ? (claudeModelOptions.find((m) => m.id === stored.model)?.id ?? "")
+              : (restoredDraft?.pickedModel ?? "sonnet")),
       );
       setPickedEffort(
-        !storedRoutingOn &&
-          stored.effort != null &&
-          CLAUDE_NATIVE_EFFORTS.some((e) => e.value === stored.effort)
-          ? stored.effort
-          : "",
+        storedRoutingOn
+          ? ""
+          : "effort" in stored
+            ? (CLAUDE_NATIVE_EFFORTS.find((e) => e.value === stored.effort)?.value ?? "")
+            : (restoredDraft?.pickedEffort ?? "high"),
       );
     } else if (supportsApprovalMode) {
       setBypassSandbox(
@@ -4120,11 +4158,34 @@ export function NewChatLandingScreen() {
       );
     } else if (supportsCursorMode) {
       setCursorExecMode(resolve(CURSOR_NATIVE_EXEC_MODES, CURSOR_NATIVE_DEFAULT_EXEC_MODE));
+      setPickedModel("");
+      setPickedEffort("");
     } else if (supportsAgySkipPermissions) {
       setAgySkipMode(resolve(AGY_NATIVE_SKIP_MODES, AGY_NATIVE_DEFAULT_SKIP_MODE));
+      setPickedModel("");
+      setPickedEffort("");
     } else if (supportsDevinPermission) {
       setDevinPermissionMode(
         resolve(DEVIN_NATIVE_PERMISSION_MODES, DEVIN_NATIVE_DEFAULT_PERMISSION_MODE),
+      );
+      // Devin has its own model families; the shared state must carry Devin's
+      // own remembered pick, never one another harness seeded.
+      setPickedModel(
+        selectedNativeHarness === "devin-native" &&
+          stored.model != null &&
+          devinModelOptions.some((m) => m.id === stored.model)
+          ? stored.model
+          : "",
+      );
+      setPickedEffort(
+        selectedNativeHarness === "devin-native" &&
+          stored.effort != null &&
+          codexEffortLevelsForModel(
+            devinModelOptions,
+            stored.model || devinModelOptions.find((m) => m.isDefault)?.id,
+          ).includes(stored.effort)
+          ? stored.effort
+          : "",
       );
     }
     // Reseed on harness changes, when the selected host's catalog resolves,
@@ -4137,6 +4198,7 @@ export function NewChatLandingScreen() {
     selectedNativeHarness,
     claudeModelOptions,
     codexModelOptions,
+    devinModelOptions,
     piModelOptions,
     projectDefaultModel,
   ]);
@@ -4304,6 +4366,11 @@ export function NewChatLandingScreen() {
     _setCostControlMode(null);
   }, [info, smartRoutingEnabled, pickedHarness]);
   const workspaceTrimmed = workspace.trim();
+  const setWorkspaceExplicit = useCallback((path: string) => {
+    workspaceFromConfigRef.current = false;
+    workspaceWasDefaultedRef.current = false;
+    setWorkspace(path);
+  }, []);
   const workspaceValid = isValidWorkspace(workspace);
   const isCloudHost =
     sandboxSelected || (selectedHost?.name?.toLowerCase().includes("cloud") ?? false);
@@ -4492,6 +4559,7 @@ export function NewChatLandingScreen() {
         // Config-sourced seed into an empty slot (locationStep only ever
         // writes the config workspace); idempotent under a re-run.
         workspaceFromConfigRef.current = true;
+        workspaceWasDefaultedRef.current = false;
         return writes.workspace!;
       });
     }
@@ -5033,6 +5101,7 @@ export function NewChatLandingScreen() {
     // the new host.
     setWorkspace("");
     workspaceFromConfigRef.current = false;
+    workspaceWasDefaultedRef.current = false;
     seededHostRef.current = null;
   }
 
@@ -5052,6 +5121,7 @@ export function NewChatLandingScreen() {
     setSelectedHostId(null);
     setWorkspace("");
     workspaceFromConfigRef.current = false;
+    workspaceWasDefaultedRef.current = false;
     seededHostRef.current = null;
   }
 
@@ -5215,6 +5285,15 @@ export function NewChatLandingScreen() {
     submittedDraftRevisionRef.current = landingDraftRevision;
     submittedRef.current = true;
     try {
+      if (!sandboxSelected && selectedHostId && workspaceWasDefaultedRef.current) {
+        try {
+          await createHostDirectory(selectedHostId, workspaceTrimmed);
+        } catch (dirErr: unknown) {
+          if (!(dirErr instanceof Error && dirErr.message === "directory already exists")) {
+            throw dirErr;
+          }
+        }
+      }
       const trimmedBranch = branchName.trim();
       const composerContextLabels = composerContextToLabels(composerContextState);
       // `shouldCreateWorktree` (component scope): true only when a branch is
@@ -5554,7 +5633,7 @@ export function NewChatLandingScreen() {
                   previewSandboxProvider,
                   previewHarness,
                   effectiveAgentId,
-                  cacheUser,
+                  resolvedUserId,
                 ),
               });
             }
@@ -5705,8 +5784,11 @@ export function NewChatLandingScreen() {
           navigate(`/c/${data.id}`);
         }
       }
-    } catch {
-      const msg = "Couldn't reach the server. Check your connection and try again.";
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : "Couldn't reach the server. Check your connection and try again.";
       returnDraftToUser(localConv?.tempConvId);
       tearDownLocalConversation();
       // Toast when the landing screen is gone (navigate-first); inline otherwise.
@@ -6091,8 +6173,7 @@ export function NewChatLandingScreen() {
                         paths={recent}
                         selectedPath={workspaceTrimmed}
                         onSelect={(path) => {
-                          workspaceFromConfigRef.current = false;
-                          setWorkspace(path);
+                          setWorkspaceExplicit(path);
                           addRecent(path);
                           setWorkspacePopoverOpen(false);
                         }}
@@ -6182,6 +6263,7 @@ export function NewChatLandingScreen() {
                               checked={branchName.trim() === "" && activeWorktree === null}
                               onChange={() => {
                                 workspaceFromConfigRef.current = false;
+                                workspaceWasDefaultedRef.current = false;
                                 if (activeWorktree !== null && mainWorktree !== null) {
                                   setWorkspace(mainWorktree.path);
                                 }
@@ -6224,8 +6306,7 @@ export function NewChatLandingScreen() {
                                         }
                                         name="new-chat-existing-worktree"
                                         onSelect={() => {
-                                          workspaceFromConfigRef.current = false;
-                                          setWorkspace(worktree.path);
+                                          setWorkspaceExplicit(worktree.path);
                                           setBranchName("");
                                           setAutoSeededBranch("");
                                           setWorktreePopoverOpen(false);
@@ -6893,8 +6974,7 @@ export function NewChatLandingScreen() {
                 hostId={selectedHostId}
                 initialPath={workspacePickerInitialPath}
                 onSelect={(path) => {
-                  workspaceFromConfigRef.current = false;
-                  setWorkspace(path);
+                  setWorkspaceExplicit(path);
                   addRecent(path);
                   setWorkspacePickerOpen(false);
                 }}
