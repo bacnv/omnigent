@@ -4388,6 +4388,10 @@ describe("NewChatLandingScreen", () => {
 
     // Switch the sidekick; the composed variant flows to the create body.
     fireEvent.click(screen.getByTestId("new-chat-landing-agent-fusion-sidekick-swe-2-high"));
+    devinWithFusion.data = [...devinWithFusion.data];
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "refresh catalog" },
+    });
     const { body } = await submitAndReadBody();
     expect(body.model_override).toBe("fusion-fable-medium-swe2high");
     expect(body.reasoning_effort).toBeUndefined();
@@ -5524,6 +5528,31 @@ describe("NewChatLandingScreen", () => {
     const [, init] = authenticatedFetchMock.mock.calls[0];
     const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
     expect(body.model_override).toBeUndefined();
+  });
+
+  it("does not seed Claude from a remounted Codex draft", async () => {
+    renderLanding();
+    openAgentModels("a2");
+    pickPrimaryOption("model", "GPT-5.6");
+    pickPrimaryOption("effort", "xHigh");
+    closePrimaryPicker();
+    cleanup();
+    renderLanding();
+    selectAgent("a1");
+    const { body } = await submitAndReadBody();
+    expect(body.model_override).toBe("sonnet");
+    expect(body.reasoning_effort).toBe("high");
+  });
+
+  it("shows the effort sent with Claude's harness default model", async () => {
+    renderLanding();
+    openAgentModels("a1");
+    pickPrimaryOption("model", "Harness default");
+    closePrimaryPicker();
+    expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(/Effort High/);
+    const { body } = await submitAndReadBody();
+    expect(body.model_override).toBeUndefined();
+    expect(body.reasoning_effort).toBe("high");
   });
 
   it("offers every Codex approval mode in the hand dropdown", () => {

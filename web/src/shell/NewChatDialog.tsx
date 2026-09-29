@@ -3339,12 +3339,11 @@ export function NewChatLandingScreen() {
           : (claudeModelOptions.find((m) => m.id === pickedModel)?.displayName ??
               defaultModelLabel(claudeModelOptions)),
       );
-      // Routing owns effort per turn, so the summary shows an em-dash. An
-      // effort only rides a resolved model pick: with the catalog still empty
-      // there is nothing to attach it to, so the row stays off.
+      // Hide effort while the catalog is pending; a resolved harness default
+      // still carries an explicit effort override.
       const effortValue = routingOn
         ? EFFORT_UNAVAILABLE_PLACEHOLDER
-        : pickedModel
+        : claudeModelOptions.length > 0
           ? normalizeEffortLabel(pickedEffort)
           : "";
       const permissionValue =
@@ -4110,14 +4109,18 @@ export function NewChatLandingScreen() {
             ? ""
             : "model" in stored
               ? (claudeModelOptions.find((m) => m.id === stored.model)?.id ?? "")
-              : (restoredDraft?.pickedModel ?? "sonnet")),
+              : restoredDraft?.pickedAgentId === effectiveAgentId
+                ? restoredDraft.pickedModel
+                : "sonnet"),
       );
       setPickedEffort(
         storedRoutingOn
           ? ""
           : "effort" in stored
             ? (CLAUDE_NATIVE_EFFORTS.find((e) => e.value === stored.effort)?.value ?? "")
-            : (restoredDraft?.pickedEffort ?? "high"),
+            : restoredDraft?.pickedAgentId === effectiveAgentId
+              ? restoredDraft.pickedEffort
+              : "high",
       );
     } else if (supportsApprovalMode) {
       setBypassSandbox(
@@ -4166,12 +4169,11 @@ export function NewChatLandingScreen() {
       );
       // Devin has its own model families; the shared state must carry Devin's
       // own remembered pick, never one another harness seeded.
+      const devinFusion = fusionOption(devinModelOptions)?.fusion;
       setPickedModel(
-        selectedNativeHarness === "devin-native" &&
-          stored.model != null &&
-          devinModelOptions.some((m) => m.id === stored.model)
-          ? stored.model
-          : "",
+        devinFusion && isFusionModelUid(stored.model)
+          ? currentFusionCombo(devinFusion, stored.model ?? "").modelUid
+          : (devinModelOptions.find((m) => m.id === stored.model)?.id ?? ""),
       );
       setPickedEffort(
         selectedNativeHarness === "devin-native" &&
@@ -5490,7 +5492,13 @@ export function NewChatLandingScreen() {
             // real host (null for a sandbox create).
             hostId: sandboxSelected ? null : selectedHostId,
           });
-          if (localConv !== null) navigate(`/c/${localConv.tempConvId}`);
+          if (
+            localConv !== null &&
+            onScreenRef.current &&
+            window.location.href === createLocation
+          ) {
+            navigate(`/c/${localConv.tempConvId}`);
+          }
         } catch {
           /* non-fatal: the response still opens the server session */
         }
