@@ -163,13 +163,24 @@ async def test_refresh_loop_skips_write_when_factory_returns_none(
         lambda _dir, headers: rewritten.append(headers["Authorization"]) or True,
     )
 
+    sleeps = 0
+    mints = 0
+
     async def _sleep(_s: float) -> None:
-        raise asyncio.CancelledError()
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps == 2:
+            raise asyncio.CancelledError()
+
+    def _factory() -> None:
+        nonlocal mints
+        mints += 1
 
     task = asyncio.create_task(
-        _refresh_claude_permission_hook_auth(_BRIDGE_DIR, _SERVER_URL, lambda: None, sleep=_sleep)
+        _refresh_claude_permission_hook_auth(_BRIDGE_DIR, _SERVER_URL, _factory, sleep=_sleep)
     )
     await asyncio.wait({task})
+    assert mints == 1
     assert rewritten == [], "None token must not trigger a restamp"
 
 
