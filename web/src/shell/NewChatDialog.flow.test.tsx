@@ -2477,6 +2477,64 @@ describe("NewChatLandingScreen create flow", () => {
     );
   });
 
+  it.each([false, true])(
+    "does not redirect after leaving while directory creation is pending (unmounted: %s)",
+    async (unmounted) => {
+      localStorage.removeItem(RECENT_KEY);
+      mockCurrentUserId = "bacnv";
+      mockHomeListing = {
+        entries: [
+          {
+            name: "projects",
+            path: "/home/claude/projects",
+            type: "directory",
+            bytes: null,
+            modified_at: 0,
+          },
+        ],
+        truncated: false,
+      };
+      let finishDirectory!: (path: string) => void;
+      createHostDirectoryMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishDirectory = resolve;
+          }),
+      );
+      beginLocalConversationMock.mockReturnValue({
+        tempConvId: "temp:1234567890abcdef1234567890abcdef",
+        pendingMsgTempId: "pend_1",
+        createToken: "1234567890abcdef1234567890abcdef",
+      });
+      vi.mocked(authenticatedFetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: "conv_new" }),
+      } as unknown as Response);
+      const initialLocation = window.location.href;
+      try {
+        renderLanding();
+        await waitFor(() =>
+          expect(screen.getByTestId("new-chat-landing-workspace-chip")).toHaveAttribute(
+            "title",
+            "/home/claude/bacnv",
+          ),
+        );
+        typeMessage("go");
+        fireEvent.click(screen.getByTestId("new-chat-landing-submit"));
+        await waitFor(() => expect(createHostDirectoryMock).toHaveBeenCalledTimes(1));
+        window.history.pushState({}, "", "/c/other");
+        if (unmounted) cleanup();
+        await act(async () => {
+          finishDirectory("/home/claude/bacnv");
+        });
+        await waitFor(() => expect(hydrateLocalConversationMock).toHaveBeenCalled());
+        expect(navigateMock).not.toHaveBeenCalled();
+      } finally {
+        window.history.replaceState({}, "", initialLocation);
+      }
+    },
+  );
+
   it("preserves generated-directory provenance across a remount", async () => {
     localStorage.removeItem(RECENT_KEY);
     mockCurrentUserId = "root";
