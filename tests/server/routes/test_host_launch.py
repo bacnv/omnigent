@@ -113,10 +113,9 @@ class TestResolveHostOwner:
             user_id="alice",
             host_id="host_1",
             host_store=store,
-            permission_store=perms,
+            permission_store=perms,  # type: ignore[arg-type]
         )
         assert result.host_id == "host_1"
-
 
     def test_non_admin_owned_host_still_403_with_permission_store(self) -> None:
         host = _FakeHost(host_id="host_1", user_id="bob")
@@ -127,10 +126,9 @@ class TestResolveHostOwner:
                 user_id="alice",
                 host_id="host_1",
                 host_store=store,
-                permission_store=perms,
+                permission_store=perms,  # type: ignore[arg-type]
             )
         assert exc_info.value.status_code == 403
-
 
     def test_missing_permission_store_keeps_strict_ownership(self) -> None:
         host = _FakeHost(host_id="host_1", user_id="admin@example.com")
@@ -143,7 +141,6 @@ class TestResolveHostOwner:
                 permission_store=None,
             )
         assert exc_info.value.status_code == 403
-
 
 
 # ── resolve_host_launch ──────────────────────────────────────────────
@@ -308,9 +305,7 @@ class TestResolveHostLaunch:
         assert exc_info.value.status_code == 404
         assert conv_store.reads == []
 
-    def test_admin_owned_host_launch_allowed_when_session_owned(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_admin_owned_host_launch_allowed_when_session_owned(self) -> None:
         host = _FakeHost(host_id="host_1", user_id="admin@example.com")
         conn = object()
         conv = Conversation(
@@ -325,13 +320,6 @@ class TestResolveHostLaunch:
         conv_store = _FakeConversationStore(convs={"s1": conv})
         perms = _FakePermissionStore(admins={"admin@example.com"}, grants={("alice", "s1")})
 
-        monkeypatch.setattr(
-            "omnigent.server.routes._host_launch.check_session_access",
-            lambda user_id, session_id, level, permission_store, conversation_store: (
-                user_id == "alice" and session_id == "s1"
-            ),
-        )
-
         result = resolve_host_launch(
             user_id="alice",
             host_id="host_1",
@@ -339,15 +327,12 @@ class TestResolveHostLaunch:
             host_store=store,
             host_registry=registry,
             conversation_store=conv_store,
-            permission_store=perms,
+            permission_store=perms,  # type: ignore[arg-type]
         )
         assert result.host.host_id == "host_1"
         assert result.conv.id == "s1"
 
-
-    def test_session_owner_enforcement_unchanged_on_admin_host(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_session_owner_enforcement_unchanged_on_admin_host(self) -> None:
         host = _FakeHost(host_id="host_1", user_id="admin@example.com")
         conn = object()
         conv = Conversation(
@@ -362,11 +347,6 @@ class TestResolveHostLaunch:
         conv_store = _FakeConversationStore(convs={"s1": conv})
         perms = _FakePermissionStore(admins={"admin@example.com"})
 
-        monkeypatch.setattr(
-            "omnigent.server.routes._host_launch.check_session_access",
-            lambda *args, **kwargs: False,
-        )
-
         with pytest.raises(HTTPException) as exc_info:
             resolve_host_launch(
                 user_id="alice",
@@ -375,10 +355,9 @@ class TestResolveHostLaunch:
                 host_store=store,
                 host_registry=registry,
                 conversation_store=conv_store,
-                permission_store=perms,
+                permission_store=perms,  # type: ignore[arg-type]
             )
         assert exc_info.value.status_code == 404
-
 
 
 # ── host_absent_error (single-replica vs sharded) ─────────────────────

@@ -4239,4 +4239,3 @@ async def test_claude_terminal_exit_tears_down_permission_refresh() -> None:
     finally:
         await orchestration.teardown_claude_native_permission_refresh(session_id)
         runner_app.unregister_child_session(session_id)
-
