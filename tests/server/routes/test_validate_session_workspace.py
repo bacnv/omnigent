@@ -104,23 +104,20 @@ async def test_validate_existing_host_workspace_rejects_non_admin_owner(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("sharded", "host", "expected_code"),
+    ("sharded", "status", "expected_code"),
     [
-        (True, _FakeHost("admin@example.com"), scv.ErrorCode.WRONG_REPLICA),
-        (False, _FakeHost("admin@example.com"), scv.ErrorCode.CONFLICT),
-        (
-            True,
-            _FakeHost("admin@example.com", status="offline", updated_at=0),
-            scv.ErrorCode.CONFLICT,
-        ),
+        (True, "online", scv.ErrorCode.WRONG_REPLICA),
+        (False, "online", scv.ErrorCode.CONFLICT),
+        (True, "offline", scv.ErrorCode.CONFLICT),
     ],
 )
 async def test_validate_existing_host_workspace_classifies_registry_miss(
     monkeypatch: pytest.MonkeyPatch,
     sharded: bool,
-    host: _FakeHost,
+    status: str,
     expected_code: scv.ErrorCode,
 ) -> None:
+    host = _FakeHost("admin@example.com", status=status)
     perms = _FakePermissionStore(admins={"admin@example.com"})
     monkeypatch.setattr(
         "omnigent.server.routes._host_launch._deployment_is_sharded",
