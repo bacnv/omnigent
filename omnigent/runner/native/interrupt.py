@@ -44,6 +44,7 @@ from omnigent.runner.native.orchestration import (
     _cancel_auto_forwarder_task,
     _claude_native_bridge_id_for_session,
     _session_labels_for_runner_spawn,
+    teardown_claude_native_permission_refresh,
 )
 from omnigent.runner.resource_registry import (
     _STATUS_EMITTING_TERMINAL_ROLES,
@@ -525,6 +526,7 @@ class NativeInterruptRunner:
         from omnigent.entities.session_resources import terminal_resource_id
         from omnigent.runner.tool_dispatch import _publish_terminal_deleted_event
 
+        await teardown_claude_native_permission_refresh(conv_id)
         terminal_registry = self._resource_registry.terminal_registry
         if terminal_registry is None:
             return

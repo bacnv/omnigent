@@ -4845,3 +4845,82 @@ async def test_auto_create_claude_terminal_default_pin_requires_a_fresh_catalog(
         assert model_catalog_store.read_catalog("claude-native", fingerprint) == refreshed
 
     await fake_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auto_create_claude_terminal_exit_during_model_reset_cancels_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exit during the awaited model reset must see the launched pane's refresher."""
+    from omnigent.runner.native import orchestration
+    from omnigent.runner.resource_registry import TerminalExitEvent, TerminalLifecycle
+
+    monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.forwarder.supervise_forwarder", _no_op_forwarder
+    )
+
+    async def _catalog(config: object) -> list[dict[str, object]]:
+        return [{"id": "opus", "model": "claude-opus-5", "isDefault": True}]
+
+    monkeypatch.setattr("omnigent.harnesses.claude_native.main.claude_launch_catalog", _catalog)
+    monkeypatch.setattr(
+        "omnigent.harnesses.claude_native.main.claude_launch_catalog_is_stale",
+        lambda config: False,
+    )
+    session_id = "conv_refresh_exit_during_model_reset"
+    app = create_runner_app(server_client=NullServerClient())  # type: ignore[arg-type]
+    publish_exit = app.state.session_resource_registry._terminal_exit_publisher
+    teardown_done = asyncio.Event()
+    refresh_at_reset: asyncio.Task[None] | None = None
+
+    teardown_refresh = orchestration.teardown_claude_native_permission_refresh
+
+    async def _teardown(session_id: str) -> None:
+        await teardown_refresh(session_id)
+        teardown_done.set()
+
+    monkeypatch.setattr(orchestration, "teardown_claude_native_permission_refresh", _teardown)
+
+    async def _handle_request(request: httpx.Request) -> httpx.Response:
+        nonlocal refresh_at_reset
+        if request.method == "PATCH" and "model_override" in json.loads(request.content):
+            refresh_at_reset = orchestration._AUTO_CLAUDE_PERMISSION_REFRESH_TASKS.get(session_id)
+            teardown_done.clear()
+            publish_exit(
+                TerminalExitEvent(
+                    session_id=session_id,
+                    terminal_id="terminal_claude_main",
+                    terminal_name="claude",
+                    session_key="main",
+                    lifecycle=TerminalLifecycle.REQUIRED,
+                    session_was_idle=True,
+                )
+            )
+            await asyncio.wait_for(teardown_done.wait(), timeout=2)
+        return httpx.Response(200, json={"model_override": "gpt-5.4", "labels": {}})
+
+    async def _resolve() -> None:
+        return None
+
+    async with httpx.AsyncClient(
+        base_url="http://test-server", transport=httpx.MockTransport(_handle_request)
+    ) as client:
+        try:
+            await _auto_create_claude_terminal(
+                session_id,
+                _RecordingClaudeRegistry({}),
+                lambda _sid, _evt: None,
+                server_client=client,
+                resolve_launch_config=_resolve,
+                auth_token_factory=lambda: "runner-token",
+            )
+            assert teardown_done.is_set()
+            assert session_id not in orchestration._AUTO_CLAUDE_PERMISSION_REFRESH_TASKS
+            assert refresh_at_reset is not None and refresh_at_reset.cancelled()
+        finally:
+            await orchestration.teardown_claude_native_permission_refresh(session_id)
+            await orchestration._cancel_auto_forwarder_task(session_id)

@@ -10,6 +10,7 @@ no-handler fall-through contract (antigravity/opencode), and the 503 mapping.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -472,12 +473,15 @@ async def test_codex_interrupt_noop_when_no_bridge_state() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_terminal_registry", [False, True])
 async def test_claude_stop_is_idempotent_without_advertised_tmux(
     monkeypatch: pytest.MonkeyPatch,
+    with_terminal_registry: bool,
 ) -> None:
     """An already-absent Claude pane still completes stop teardown."""
     import omnigent.harnesses.claude_native.bridge as claude_bridge
     from omnigent.runner.native import interrupt as interrupt_mod
+    from omnigent.runner.native import orchestration
 
     async def _fake_bridge_id(*, server_client: Any, session_id: str) -> str:
         del server_client, session_id
@@ -491,11 +495,20 @@ async def test_claude_stop_is_idempotent_without_advertised_tmux(
     monkeypatch.setattr(claude_bridge, "bridge_dir_for_bridge_id", lambda bridge_id: bridge_id)
     monkeypatch.setattr(claude_bridge, "kill_session", _absent)
 
-    runner, captured = _make_runner()
-    resp = await runner.stop("claude-native", "conv_cn")
-
-    assert isinstance(resp, Response) and resp.status_code == 204
-    assert captured["wakes"] == [("conv_cn", "cancelled", None)]
+    registry = _FakeResourceRegistry()
+    if not with_terminal_registry:
+        registry.terminal_registry = None
+    runner, captured = _make_runner(resource_registry=registry)
+    refresh_task = asyncio.create_task(asyncio.Event().wait())
+    orchestration._register_claude_permission_refresh_task("conv_cn", refresh_task)
+    try:
+        resp = await runner.stop("claude-native", "conv_cn")
+        assert isinstance(resp, Response) and resp.status_code == 204
+        assert captured["wakes"] == [("conv_cn", "cancelled", None)]
+        assert refresh_task.cancelled()
+        assert "conv_cn" not in orchestration._AUTO_CLAUDE_PERMISSION_REFRESH_TASKS
+    finally:
+        await orchestration.teardown_claude_native_permission_refresh("conv_cn")
 
 
 @pytest.mark.asyncio

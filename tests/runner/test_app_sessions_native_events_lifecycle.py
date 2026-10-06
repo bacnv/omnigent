@@ -4239,3 +4239,36 @@ async def test_claude_terminal_exit_tears_down_permission_refresh() -> None:
     finally:
         await orchestration.teardown_claude_native_permission_refresh(session_id)
         runner_app.unregister_child_session(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_terminal_registry", [False, True])
+async def test_reset_state_tears_down_claude_permission_refresh(
+    with_terminal_registry: bool,
+    tmp_path: Path,
+) -> None:
+    """Explicit reset owns refresh cleanup even when terminal exit watchers stop."""
+    from omnigent.runner.native import orchestration
+    from tests.runner.helpers import make_test_terminal_instance
+
+    session_id = uuid.uuid4().hex
+    terminal_registry = TerminalRegistry() if with_terminal_registry else None
+    if terminal_registry is not None:
+        terminal_registry._by_conversation[session_id] = {
+            ("claude", "main"): make_test_terminal_instance("claude", "main", tmp_path)
+        }
+    app, _ = await _build_app_for_spec(
+        _harness_spec("claude-native"), terminal_registry=terminal_registry
+    )
+    refresh_task = asyncio.create_task(asyncio.Event().wait())
+    orchestration._register_claude_permission_refresh_task(session_id, refresh_task)
+    try:
+        async with _runner_client(app) as client:
+            response = await client.post(f"/v1/sessions/{session_id}/reset-state")
+        assert response.status_code == 200, response.text
+        assert refresh_task.cancelled()
+        assert session_id not in orchestration._AUTO_CLAUDE_PERMISSION_REFRESH_TASKS
+        if terminal_registry is not None:
+            assert terminal_registry.get(session_id, "claude", "main") is None
+    finally:
+        await orchestration.teardown_claude_native_permission_refresh(session_id)

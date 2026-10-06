@@ -8943,6 +8943,16 @@ async def _auto_create_claude_terminal(
         with contextlib.suppress(Exception):
             await asyncio.to_thread(ClaudeDebugLogFollower(bridge_dir).close, session_id)
         raise
+    if _auth_factory is not None:
+        _refresh_task = asyncio.create_task(
+            _refresh_claude_permission_hook_auth(
+                bridge_dir,
+                server_url,
+                _auth_factory,
+            ),
+            name=f"claude-permission-hook-refresh-{session_id}",
+        )
+        _register_claude_permission_refresh_task(session_id, _refresh_task)
     if reset_pick_after_launch:
         await _clear_session_model_override(session_id, server_client)
     # Surface the terminal on the live SSE stream so an already-connected
@@ -9049,16 +9059,6 @@ async def _auto_create_claude_terminal(
         name=f"claude-forwarder-{session_id}",
     )
     _register_auto_forwarder_task(session_id, _forwarder_task)
-    if _auth_factory is not None:
-        _refresh_task = asyncio.create_task(
-            _refresh_claude_permission_hook_auth(
-                bridge_dir,
-                server_url,
-                _auth_factory,
-            ),
-            name=f"claude-permission-hook-refresh-{session_id}",
-        )
-        _register_claude_permission_refresh_task(session_id, _refresh_task)
     _logger.info(
         "Auto-created claude terminal + forwarder for session %s; "
         "forwarder_task=%s elapsed_ms=%.0f",
