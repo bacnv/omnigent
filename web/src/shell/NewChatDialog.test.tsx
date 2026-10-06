@@ -495,6 +495,10 @@ describe("defaultUserWorkspace", () => {
     ["/root", "bacnv", "/root/bacnv"],
     ["/", "bacnv", "/bacnv"],
     ["/home/claude/", "bacnv", "/home/claude/bacnv"],
+    ["/home/claude///", "bacnv", "/home/claude/bacnv"],
+    ["C:/Users/claude", "bacnv", "C:/Users/claude/bacnv"],
+    ["C:\\Users\\claude", "bacnv", "C:\\Users\\claude\\bacnv"],
+    ["C:\\", "bacnv", "C:\\bacnv"],
   ])("builds the default workspace for %s + %s", (home, user, expected) => {
     expect(defaultUserWorkspace(home, user)).toBe(expected);
   });
@@ -517,9 +521,12 @@ describe("defaultUserWorkspace", () => {
     expect(defaultUserWorkspace("/home/claude", user)).toBeNull();
   });
 
-  it.each(["", " ", "  "])("returns null for blank home %j", (home) => {
-    expect(defaultUserWorkspace(home, "bacnv")).toBeNull();
-  });
+  it.each(["", " ", "  ", "relative/home", "~", "C:relative"])(
+    "returns null for non-absolute home %j",
+    (home) => {
+      expect(defaultUserWorkspace(home, "bacnv")).toBeNull();
+    },
+  );
 });
 
 // Keep the submit gate aligned with the server's workspace validation.
@@ -968,6 +975,16 @@ describe("sandbox repository helpers", () => {
 // these pin the cases the seed depends on: a normal entry, a top-level entry,
 // and the one case it can't resolve (empty home → null → blank field).
 describe("deriveHomeDir", () => {
+  it.each([
+    ["C:/Users/claude/projects", "C:/Users/claude"],
+    ["C:\\Users\\claude\\projects", "C:\\Users\\claude"],
+    ["C:\\projects", "C:\\"],
+    ["/", "/"],
+    ["/home/claude/projects/", "/home/claude/projects"],
+  ])("derives home from %s", (entry, expected) => {
+    expect(deriveHomeDir([fsEntry(entry)])).toBe(expected);
+  });
+
   it("returns the parent directory of the first entry", () => {
     expect(deriveHomeDir([fsEntry("/Users/corey/projects"), fsEntry("/Users/corey/Desktop")])).toBe(
       "/Users/corey",

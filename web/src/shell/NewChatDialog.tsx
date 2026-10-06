@@ -134,7 +134,13 @@ import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { useModelPickerHotkey } from "@/hooks/useModelPickerHotkey";
 import { CliCommandBlock, renderTextWithInlineCode } from "./CliCommandBlock";
-import { isHostAbsolutePath, isNavigablePath } from "./WorkspacePicker";
+import {
+  isHostAbsolutePath,
+  isNavigablePath,
+  isWindowsDrivePath,
+  joinPath,
+  parentOf,
+} from "./WorkspacePicker";
 import { WorkspacePickerDialog } from "./WorkspacePickerDialog";
 import { RecentWorkspaceList } from "./RecentWorkspaceList";
 import {
@@ -1227,16 +1233,16 @@ export function matchSkillInvocation(
  * @returns The home directory path, or ``null`` when it can't be derived.
  */
 export function defaultUserWorkspace(home: string, username: string): string | null {
-  if (!home.trim()) return null;
-  const base = home === "/" ? "" : home.replace(/\/+$/, "");
+  if (!isHostAbsolutePath(home)) return null;
   const user = username.trim();
   if (user !== username || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(user)) return null;
-  return `${base}/${user}`;
+  return joinPath(home.replace(/\/+$/, "") || "/", user);
 }
 
 export function deriveHomeDir(entries: HostFilesystemEntry[]): string | null {
   const first = entries[0];
   if (!first) return null;
+  if (isWindowsDrivePath(first.path)) return parentOf(first.path);
   const slash = first.path.lastIndexOf("/");
   if (slash < 0) return null;
   return slash === 0 ? "/" : first.path.slice(0, slash);
