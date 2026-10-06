@@ -42,6 +42,7 @@ from omnigent.runner.native import (
     _codex_native_model_from_spec,
     _CodexNativeModelOptionsNotReady,
     _resolve_opencode_compact_model,
+    teardown_claude_native_permission_refresh,
 )
 from omnigent.runner.resource_registry import CODEX_NATIVE_TERMINAL_ROLE, SessionResourceRegistry
 from omnigent.spec.types import AgentSpec
@@ -1002,6 +1003,7 @@ def build_native_controls(
         from omnigent.entities.session_resources import terminal_resource_id
         from omnigent.runner.tool_dispatch import _publish_terminal_deleted_event
 
+        await teardown_claude_native_permission_refresh(conv_id)
         terminal_registry = resource_registry.terminal_registry
         if terminal_registry is None:
             return
