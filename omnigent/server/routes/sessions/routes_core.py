@@ -1434,6 +1434,7 @@ def register_core_routes(
             conversation_store=conversation_store,
             host_store=getattr(request.app.state, "host_store", None),
             parent=parent_conv,
+            permission_store=permission_store,
         )
         require_codex_plan_launch_support(
             harness=spec_harness(spec),
