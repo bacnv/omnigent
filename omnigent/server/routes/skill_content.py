@@ -21,6 +21,7 @@ from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import host_absent_error, resolve_host_owner
 from omnigent.stores.host_store import HostStore
+from omnigent.stores.permission_store import PermissionStore
 
 _SKILL_CONTENT_TIMEOUT_S = 15.0
 
@@ -50,6 +51,7 @@ def create_skill_content_router(
     host_store: HostStore,
     *,
     auth_provider: AuthProvider | None = None,
+    permission_store: PermissionStore | None = None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -68,6 +70,7 @@ def create_skill_content_router(
             user_id=user_id,
             host_id=host_id,
             host_store=host_store,
+            permission_store=permission_store,
         )
         harness = canonicalize_harness(harness) or harness
         if harness not in {"claude-native", "codex-native", "cursor-native"}:

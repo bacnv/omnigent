@@ -10466,6 +10466,7 @@ async def _create_session_from_existing_agent(
         conversation_store=conversation_store,
         host_store=getattr(request.app.state, "host_store", None),
         parent=_parent_for_routing,
+        permission_store=permission_store,
     )
 
     # Git worktree options (optional). Two modes on body.git:

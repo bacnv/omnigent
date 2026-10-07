@@ -37,6 +37,8 @@ from omnigent.stores.host_store import HostStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
 from tests.server.helpers import build_agent_bundle
 
+_HOST_ID = "a828988dc0b441fb8d04dad3761773b9"
+
 
 class _Auth:
     def get_user_id(self, request: Request) -> str | None:
@@ -343,6 +345,54 @@ async def test_discovery_requires_one_complete_target(skills_app, params: dict[s
         response = await client.get("/v1/skills", params=params, headers={"x-test-user": "owner"})
     assert response.status_code == 422
     assert conn.outbound_queue.empty()
+
+
+@pytest.mark.parametrize("owner_is_admin,status", [(True, 200), (False, 403)])
+async def test_host_discovery_follows_the_admin_owned_host_rule(
+    skills_app, db_uri: str, owner_is_admin: bool, status: int
+) -> None:
+    """The host-scoped form applies the same admin-host rule as session create.
+
+    Regression: this path resolved the host without the permission store,
+    so a shared admin-owned host returned 403 for every teammate.
+    """
+    app, registry, _conn, _, _, hosts = skills_app
+    hosts.upsert_on_connect(_HOST_ID, "host", "owner")
+    # ensure_user is insert-only, so flip the flag on the row the fixture made.
+    SqlAlchemyPermissionStore(db_uri).set_admin("owner", owner_is_admin)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        task = asyncio.create_task(
+            client.get(
+                "/v1/skills",
+                params={"host_id": _HOST_ID, "harness": "claude-native", "path": "/repo"},
+                headers={"x-test-user": "reader"},
+            )
+        )
+        # Let the request clear its owner check before inspecting the tunnel.
+        await asyncio.sleep(0.05)
+        live = registry.get(_HOST_ID)
+        assert live is not None
+        if status != 200:
+            response = await task
+            assert response.status_code == status
+            assert live.outbound_queue.empty()
+            return
+        frame = decode_host_frame(await asyncio.wait_for(live.outbound_queue.get(), 2))
+        assert isinstance(frame, HostSkillsFrame), (
+            "the request never reached the host — the caller was rejected before dispatch"
+        )
+        live.pending_skills[frame.request_id].set_result(
+            HostSkillsResultFrame(frame.request_id, "ok", skills=[])
+        )
+        response = await task
+
+    assert response.status_code == 200, (
+        "Admin-owned host should be discoverable by any user, got "
+        f"{response.status_code}: {response.text}"
+    )
 
 
 @pytest.mark.parametrize(

@@ -3788,27 +3788,52 @@ def create_app(
             tags=["skills"],
         )
         app.include_router(
-            create_harness_startup_router(host_registry, host_store, auth_provider=auth_provider),
+            create_harness_startup_router(
+                host_registry,
+                host_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+            ),
             prefix="/v1",
             tags=["hosts"],
         )
         app.include_router(
-            create_plugins_router(host_registry, host_store, auth_provider=auth_provider),
+            create_plugins_router(
+                host_registry,
+                host_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+            ),
             prefix="/v1",
             tags=["hosts"],
         )
         app.include_router(
-            create_skill_content_router(host_registry, host_store, auth_provider=auth_provider),
+            create_skill_content_router(
+                host_registry,
+                host_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+            ),
             prefix="/v1",
             tags=["hosts"],
         )
         app.include_router(
-            create_mcp_tools_router(host_registry, host_store, auth_provider=auth_provider),
+            create_mcp_tools_router(
+                host_registry,
+                host_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+            ),
             prefix="/v1",
             tags=["hosts"],
         )
         app.include_router(
-            create_mcp_servers_router(host_registry, host_store, auth_provider=auth_provider),
+            create_mcp_servers_router(
+                host_registry,
+                host_store,
+                auth_provider=auth_provider,
+                permission_store=permission_store,
+            ),
             prefix="/v1",
             tags=["hosts"],
         )

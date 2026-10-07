@@ -9,6 +9,7 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_availability import harness_launch_availability
 from omnigent.stores import ConversationStore
 from omnigent.stores.host_store import HostStore
+from omnigent.stores.permission_store import PermissionStore
 
 
 async def validate_create_harness_readiness(
@@ -21,11 +22,14 @@ async def validate_create_harness_readiness(
     conversation_store: ConversationStore,
     host_store: HostStore | None,
     parent: Conversation | None = None,
+    permission_store: PermissionStore | None = None,
 ) -> None:
     """Check resolved placement after parent authorization and before persistence.
 
     Children on an existing runner use their ancestor's host. Legacy hosts
     without readiness reports remain unknown; host launch checks still apply.
+    ``permission_store`` is threaded through so an admin-owned host is usable
+    here exactly as it is elsewhere, not just by its owner.
     """
     from omnigent.server.routes._host_launch import resolve_host_owner
 
@@ -48,7 +52,11 @@ async def validate_create_harness_readiness(
         host = await asyncio.to_thread(host_store.get_host, host_id) if host_id else None
     elif host_id:
         host = await asyncio.to_thread(
-            resolve_host_owner, user_id=user_id, host_id=host_id, host_store=host_store
+            resolve_host_owner,
+            user_id=user_id,
+            host_id=host_id,
+            host_store=host_store,
+            permission_store=permission_store,
         )
     else:
         host = None

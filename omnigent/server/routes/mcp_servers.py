@@ -20,6 +20,7 @@ from omnigent.server.host_registry import HostConnection, HostRegistry
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import host_absent_error, resolve_host_owner
 from omnigent.stores.host_store import HostStore
+from omnigent.stores.permission_store import PermissionStore
 
 _MCP_SERVERS_TIMEOUT_S = 15.0
 
@@ -55,6 +56,7 @@ def create_mcp_servers_router(
     host_store: HostStore,
     *,
     auth_provider: AuthProvider | None = None,
+    permission_store: PermissionStore | None = None,
 ) -> APIRouter:
     """Build the MCP inventory route, mounted under ``/v1``."""
     router = APIRouter()
@@ -67,7 +69,11 @@ def create_mcp_servers_router(
         """
         user_id = require_user(request, auth_provider)
         host = await asyncio.to_thread(
-            resolve_host_owner, user_id=user_id, host_id=host_id, host_store=host_store
+            resolve_host_owner,
+            user_id=user_id,
+            host_id=host_id,
+            host_store=host_store,
+            permission_store=permission_store,
         )
         conn = host_registry.get(host_id)
         if conn is None:

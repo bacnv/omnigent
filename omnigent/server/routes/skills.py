@@ -101,7 +101,11 @@ def create_skills_router(
                     status_code=422, detail="Provide session_id or host_id, harness, and path"
                 )
             host = await asyncio.to_thread(
-                resolve_host_owner, user_id=user_id, host_id=host_id, host_store=host_store
+                resolve_host_owner,
+                user_id=user_id,
+                host_id=host_id,
+                host_store=host_store,
+                permission_store=permission_store,
             )
             harness = canonicalize_harness(harness) or harness
             if agent_id is not None:

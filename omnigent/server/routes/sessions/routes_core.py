@@ -994,6 +994,7 @@ def register_core_routes(
             conversation_store=conversation_store,
             host_store=getattr(request.app.state, "host_store", None),
             parent=parent_conv,
+            permission_store=permission_store,
         )
         with creation_stage("create_persistence_ms"):
             result = await asyncio.to_thread(
