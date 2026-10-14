@@ -393,7 +393,11 @@ def create_imports_router(
                 # Host ownership must still hold when the import is persisted.
                 if host_store is not None:
                     await asyncio.to_thread(
-                        resolve_host_owner, user_id=user_id, host_id=host_id, host_store=host_store
+                        resolve_host_owner,
+                        user_id=user_id,
+                        host_id=host_id,
+                        host_store=host_store,
+                        permission_store=permission_store,
                     )
                 create_kwargs["host_id"] = host_id
         if project_id is not None:
