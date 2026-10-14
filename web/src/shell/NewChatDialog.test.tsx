@@ -5998,7 +5998,7 @@ describe("NewChatLandingScreen", () => {
   it("shows the effort sent with Claude's harness default model", async () => {
     renderLanding();
     openAgentModels("a1");
-    pickPrimaryOption("model", "Harness default");
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-model-default"));
     closePrimaryPicker();
     expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(/Effort High/);
     const { body } = await submitAndReadBody();
