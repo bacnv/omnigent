@@ -3568,11 +3568,14 @@ export function NewChatLandingScreen() {
           : (claudeModelOptions.find((m) => m.id === pickedModel)?.displayName ??
               defaultModelLabel(claudeModelOptions)),
       );
-      // Hide effort while the catalog is pending; a resolved harness default
-      // still carries an explicit effort override.
+      // Hide effort while the catalog is pending; a resolved (or failed)
+      // catalog still shows the effort the create will send.
+      const claudeCatalogFailed = sandboxSelected
+        ? Boolean(sandboxCatalogError || sandboxDefaultCatalogError)
+        : hostClaudeModelsError != null;
       const effortValue = routingOn
         ? EFFORT_UNAVAILABLE_PLACEHOLDER
-        : claudeModelOptions.length > 0
+        : claudeModelOptions.length > 0 || claudeCatalogFailed
           ? normalizeEffortLabel(pickedEffort)
           : "";
       const permissionValue =
@@ -3668,6 +3671,10 @@ export function NewChatLandingScreen() {
     routingOn,
     pickedModel,
     claudeModelOptions,
+    sandboxSelected,
+    sandboxCatalogError,
+    sandboxDefaultCatalogError,
+    hostClaudeModelsError,
     codexModelOptions,
     piModelOptions,
     pickedEffort,
