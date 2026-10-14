@@ -39,19 +39,23 @@ def _seed_claude_agent(db_uri: str) -> str:
 
 
 @pytest.mark.parametrize(
-    "owner,caller,expected_status",
+    "owner,caller,owner_is_admin,expected_status",
     [
-        ("alice@example.com", "alice@example.com", 201),
-        ("alice@example.com", "bob@example.com", 403),
-        (None, "alice@example.com", 404),
+        ("alice@example.com", "alice@example.com", False, 201),
+        ("alice@example.com", "bob@example.com", False, 403),
+        ("admin@example.com", "bob@example.com", True, 201),
+        (None, "alice@example.com", False, 404),
     ],
 )
 async def test_import_checks_host_ownership_before_persisting(
-    db_uri: str, owner: str | None, caller: str, expected_status: int
+    db_uri: str, owner: str | None, caller: str, owner_is_admin: bool, expected_status: int
 ) -> None:
     _seed_claude_agent(db_uri)
     host_id = "0123456789abcdef0123456789abcdef"
     host_store = HostStore(db_uri)
+    permission_store = SqlAlchemyPermissionStore(db_uri)
+    if owner is not None:
+        permission_store.ensure_user(owner, is_admin=owner_is_admin)
     if owner is not None:
         host_store.upsert_on_connect(host_id, "laptop", owner)
     conversation_store = SqlAlchemyConversationStore(db_uri)
@@ -61,6 +65,7 @@ async def test_import_checks_host_ownership_before_persisting(
             conversation_store,
             SqlAlchemyAgentStore(db_uri),
             host_store=host_store,
+            permission_store=permission_store,
             auth_provider=UnifiedAuthProvider(source="header", local_single_user=False),
         ),
         prefix="/v1",
