@@ -7988,6 +7988,11 @@ def _transcript_items_from_entry(
             agent_name=agent_name,
             current_response_id=current_response_id,
         )
+    # Only Claude's own message records carry a turn. Bookkeeping records that
+    # embed a ``message`` (``api-request-blob``'s replay cache) would mirror
+    # that turn a second time under a different source id.
+    if entry.get("type") not in ("user", "assistant"):
+        return current_response_id, []
     message = entry.get("message")
     if not isinstance(message, dict):
         return current_response_id, []
