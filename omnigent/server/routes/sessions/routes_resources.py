@@ -1678,6 +1678,7 @@ def register_resources_routes(
                 user_id=user_id,
                 host_id=source_host_id,
                 host_store=host_store,
+                permission_store=permission_store,
             )
 
         path = f"/v1/sessions/{session_id}/resources/terminals/{terminal_id}/transfer"

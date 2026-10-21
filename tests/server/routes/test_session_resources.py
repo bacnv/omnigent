@@ -1838,21 +1838,23 @@ async def test_delete_terminal_proxies_to_runner(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "source_level,target_level,host_owner,expected_status,admin,inherited",
+    "source_level,target_level,host_owner,expected_status,admin,inherited,host_owner_admin",
     [
-        (LEVEL_READ, LEVEL_OWNER, "alice@example.com", 403, False, False),
-        (LEVEL_EDIT, LEVEL_OWNER, "alice@example.com", 403, False, False),
-        (LEVEL_MANAGE, LEVEL_OWNER, "alice@example.com", 403, False, False),
-        (LEVEL_OWNER, LEVEL_READ, "alice@example.com", 403, False, False),
-        (LEVEL_OWNER, LEVEL_EDIT, "alice@example.com", 403, False, False),
-        (LEVEL_OWNER, LEVEL_MANAGE, "alice@example.com", 403, False, False),
-        (LEVEL_OWNER, LEVEL_OWNER, "bob@example.com", 403, False, False),
-        (LEVEL_OWNER, LEVEL_OWNER, None, 403, False, False),
-        (LEVEL_OWNER, LEVEL_OWNER, "", 404, False, False),
-        (LEVEL_OWNER, LEVEL_OWNER, "alice@example.com", 200, False, False),
-        (LEVEL_READ, LEVEL_READ, "bob@example.com", 403, True, False),
-        (LEVEL_READ, LEVEL_READ, "bob@example.com", 403, True, True),
-        (LEVEL_OWNER, LEVEL_OWNER, "alice@example.com", 200, False, True),
+        (LEVEL_READ, LEVEL_OWNER, "alice@example.com", 403, False, False, False),
+        (LEVEL_EDIT, LEVEL_OWNER, "alice@example.com", 403, False, False, False),
+        (LEVEL_MANAGE, LEVEL_OWNER, "alice@example.com", 403, False, False, False),
+        (LEVEL_OWNER, LEVEL_READ, "alice@example.com", 403, False, False, False),
+        (LEVEL_OWNER, LEVEL_EDIT, "alice@example.com", 403, False, False, False),
+        (LEVEL_OWNER, LEVEL_MANAGE, "alice@example.com", 403, False, False, False),
+        (LEVEL_OWNER, LEVEL_OWNER, "bob@example.com", 403, False, False, False),
+        (LEVEL_OWNER, LEVEL_OWNER, None, 403, False, False, False),
+        (LEVEL_OWNER, LEVEL_OWNER, "", 404, False, False, False),
+        (LEVEL_OWNER, LEVEL_OWNER, "alice@example.com", 200, False, False, False),
+        (LEVEL_READ, LEVEL_READ, "bob@example.com", 403, True, False, False),
+        (LEVEL_READ, LEVEL_READ, "bob@example.com", 403, True, True, False),
+        (LEVEL_OWNER, LEVEL_OWNER, "alice@example.com", 200, False, True, False),
+        (LEVEL_OWNER, LEVEL_OWNER, "root@example.com", 200, False, False, True),
+        (LEVEL_OWNER, LEVEL_OWNER, "root@example.com", 200, False, True, True),
     ],
 )
 async def test_terminal_transfer_requires_session_and_host_ownership(
@@ -1864,6 +1866,7 @@ async def test_terminal_transfer_requires_session_and_host_ownership(
     expected_status: int,
     admin: bool,
     inherited: bool,
+    host_owner_admin: bool,
 ) -> None:
     """Placement changes require authority over both sessions and their host."""
     del runner_globals_reset
@@ -1888,6 +1891,9 @@ async def test_terminal_transfer_requires_session_and_host_ownership(
     permissions = _StubPermissionStore()
     if admin:
         permissions.add_admin("alice@example.com")
+    if host_owner_admin:
+        # An admin-owned host is usable by every authenticated user.
+        permissions.add_admin(host_owner)
     permissions.add_grant("alice@example.com", source_id, source_level)
     permissions.add_grant("alice@example.com", target_id, target_level)
     if inherited:
