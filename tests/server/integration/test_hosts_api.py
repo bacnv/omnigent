@@ -1124,10 +1124,10 @@ async def test_launch_runner_admin_owned_allowed_for_other_user(
         conn = registry.get("d4e5f60718293a4b5c6d7e8f901a2b3c")
         assert conn is not None
         for _ in range(20):
-            data = await conn.outbound_queue.get()
-            if data is None:
+            queued = await conn.outbound_queue.get()
+            if queued is None:
                 continue
-            frame = decode_host_frame(data)
+            frame = decode_host_frame(queued.data)
             if isinstance(frame, HostLaunchRunnerFrame):
                 future = conn.pending_launches.get(frame.request_id)
                 if future is not None and not future.done():

@@ -390,7 +390,7 @@ async def test_host_discovery_follows_the_admin_owned_host_rule(
             assert response.status_code == status
             assert live.outbound_queue.empty()
             return
-        frame = decode_host_frame(await asyncio.wait_for(live.outbound_queue.get(), 2))
+        frame = decode_host_frame((await asyncio.wait_for(live.outbound_queue.get(), 2)).data)
         assert isinstance(frame, HostSkillsFrame), (
             "the request never reached the host — the caller was rejected before dispatch"
         )
