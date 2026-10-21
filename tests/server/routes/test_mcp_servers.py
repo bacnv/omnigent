@@ -174,7 +174,7 @@ async def test_admin_owned_host_reachable_by_other_user(mcp_app) -> None:
         task = asyncio.create_task(
             client.get(f"/v1/hosts/{_HOST_ID}/mcp-servers", headers={"x-test-user": "alice"})
         )
-        frame = decode_host_frame(await asyncio.wait_for(conn.outbound_queue.get(), 2))
+        frame = decode_host_frame((await asyncio.wait_for(conn.outbound_queue.get(), 2)).data)
         assert isinstance(frame, HostMcpServersFrame), (
             "the request never reached the host — the caller was rejected before dispatch"
         )
