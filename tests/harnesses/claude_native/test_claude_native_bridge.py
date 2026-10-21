@@ -1319,6 +1319,74 @@ def test_read_transcript_items_since_strips_inline_image_data(tmp_path: Path) ->
     assert len(output) < 300
 
 
+def test_read_transcript_items_since_ignores_request_blob_records(tmp_path: Path) -> None:
+    """
+    ``api-request-blob`` bookkeeping records are not conversational items.
+
+    Claude appends a replay cache for each request it sends. It carries a
+    ``message`` with the request's assistant/user content but no ``uuid``,
+    so parsing it as a real turn mirrors every message a second time under
+    a different source id.
+    """
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "uuid": "assistant-1",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "one answer"}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "api-request-blob",
+                        "hash": "abc123",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "one answer"}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "uuid": "user-1",
+                        "message": {"role": "user", "content": "one prompt"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "api-request-blob",
+                        "hash": "def456",
+                        "message": {"role": "user", "content": "one prompt"},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    _cursor, _current_response_id, items = read_transcript_items_since(
+        transcript_path,
+        0,
+        agent_name="claude-native-ui",
+    )
+
+    texts = [
+        block["text"]
+        for item in items
+        for block in item.data.get("content", [])
+        if isinstance(block, dict) and block.get("type") in ("output_text", "input_text")
+    ]
+    assert texts == ["one answer", "one prompt"]
+
+
 def test_read_transcript_items_since_marks_task_notifications_meta(tmp_path: Path) -> None:
     task_notification = (
         "<task-notification>\n"
