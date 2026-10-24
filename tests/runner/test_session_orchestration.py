@@ -617,3 +617,52 @@ async def test_managed_create_routes_to_reserved_host_through_auth_retry(monkeyp
     headers, body = requests[-1]
     assert headers.get(OMNIGENT_SLICE_KEY_HEADER.lower()) == body.get("host_id")
     assert ("host_id" in body) is supported
+
+
+@pytest.mark.parametrize(
+    "args,base_url,expected",
+    [
+        # Unset / direct Anthropic keep auto: the classifier is reachable.
+        (("--permission-mode", "auto"), None, ("--permission-mode", "auto")),
+        (
+            ("--permission-mode", "auto"),
+            "https://api.anthropic.com/v1",
+            ("--permission-mode", "auto"),
+        ),
+        (
+            ("--permission-mode", "auto"),
+            "https://eu.api.anthropic.com/v1",
+            ("--permission-mode", "auto"),
+        ),
+        # Any other endpoint is a proxy: auto would hang, fall back to prompting.
+        (
+            ("--permission-mode", "auto"),
+            "http://192.168.61.233:20128/v1",
+            ("--permission-mode", "default"),
+        ),
+        (
+            ("--permission-mode", "auto"),
+            "https://w.ai-gateway.cloud.databricks.com/anthropic",
+            ("--permission-mode", "default"),
+        ),
+        # Only auto is rewritten; other modes and adjacent flags are untouched.
+        (
+            ("--permission-mode", "acceptEdits"),
+            "http://gateway/v1",
+            ("--permission-mode", "acceptEdits"),
+        ),
+        (("--model", "opus"), "http://gateway/v1", ("--model", "opus")),
+        (
+            ("--permission-mode", "auto", "--model", "opus"),
+            "http://gateway/v1",
+            ("--permission-mode", "default", "--model", "opus"),
+        ),
+    ],
+)
+def test_gateway_rewrites_auto_permission_mode_to_default(args, base_url, expected):
+    """Auto mode's classifier cannot run through a proxy, so the launch must prompt instead."""
+    from omnigent.runner.native.orchestration import _drop_gateway_auto_permission_mode
+
+    assert (
+        _drop_gateway_auto_permission_mode(args, base_url=base_url, session_id="sid") == expected
+    )
