@@ -678,6 +678,57 @@ def _conversation_url_for_active_session(
     return fallback_url
 
 
+def _bridge_auth_headers(bridge_dir: Path) -> dict[str, str] | None:
+    """
+    Read the runner-refreshed bearer out of ``permission_hook.json``.
+
+    :param bridge_dir: Native Claude bridge directory.
+    :returns: ``ap_auth_headers`` dict, or ``None`` when the file is absent,
+        malformed, or carries no headers.
+    """
+    raw = read_permission_hook_config(bridge_dir).get("ap_auth_headers")
+    if not isinstance(raw, dict):
+        return None
+    headers = {str(key): str(value) for key, value in raw.items()}
+    return headers or None
+
+
+def _refreshed_auth_headers(
+    current: dict[str, str],
+    refresh_headers: Callable[[], dict[str, str] | None] | None,
+    reauth: Callable[[], dict[str, str] | None] | None,
+) -> dict[str, str] | None:
+    """
+    Rebuild outbound headers after the server rejected the current bearer.
+
+    The runner rewrites ``permission_hook.json``'s ``ap_auth_headers`` every
+    minute, but a hook snapshots them once at launch — so a prompt parked
+    longer than the token's ~30 min lifetime keeps POSTing a dead bearer and
+    the web card never appears. Re-reading the file is the only refresh that
+    works on that path; *reauth* is the fallback for hosts whose credential
+    lives in the OS login store instead.
+
+    :param current: Headers that were rejected; kept when nothing refreshes.
+    :param refresh_headers: Callable returning the bridge file's current
+        headers, or ``None`` when absent/unreadable.
+    :param reauth: Callable re-minting a token from the local login store,
+        or ``None``.
+    :returns: Fresh headers, or ``None`` when neither source yielded a
+        different token.
+    """
+    stale = current.get("Authorization")
+    for source in (refresh_headers, reauth):
+        if source is None:
+            continue
+        try:
+            candidate = source()
+        except Exception:  # noqa: BLE001 — a refresh must never fail the hook
+            continue
+        if candidate and candidate.get("Authorization") not in (None, stale):
+            return {**current, **candidate}
+    return None
+
+
 def _post_hook_with_reattach(
     url: str,
     headers: dict[str, str],
@@ -685,6 +736,7 @@ def _post_hook_with_reattach(
     hook_label: str,
     reauth: Callable[[], dict[str, str] | None] | None = None,
     wait_marker: Path | None = None,
+    refresh_headers: Callable[[], dict[str, str] | None] | None = None,
 ) -> httpx.Response | None:
     """
     POST one permission-style hook payload, surviving severed long-polls.
@@ -769,6 +821,14 @@ def _post_hook_with_reattach(
         :func:`approval_wait_marker_path`, so the idle pane reaper spares a
         pane parked on this prompt. ``None`` skips the marker (non-approval
         callers).
+    :param refresh_headers: Optional callable that re-reads the token the
+        runner keeps refreshing on disk (``permission_hook.json``) and
+        returns its headers. Called on every auth rejection, before and
+        independently of *reauth*. A hook process snapshots its headers at
+        launch, so a day-long park outlives the runner's ~30 min token; the
+        runner refreshes the file every minute, and re-reading it here is
+        what lets a parked prompt recover on its own. ``None`` keeps the
+        launch snapshot.
     :returns: The successful (2xx) response, or ``None`` when rejected
         or out of budget — callers fail-ask as before.
     """
@@ -808,7 +868,7 @@ def _post_hook_with_reattach(
                 with httpx.Client(headers=headers, timeout=timeout) as client:
                     resp = client.post(url, json=body)
                     if (
-                        reauth is not None
+                        (reauth is not None or refresh_headers is not None)
                         and not reauthed
                         and _is_login_redirect_or_unauthorized(resp)
                     ):
@@ -816,8 +876,8 @@ def _post_hook_with_reattach(
                         # lifetime): re-mint and retry once rather than fail-asking
                         # into a terminal prompt no one watches. Mirrors the
                         # evaluate-policy hook and ``_RunnerDatabricksAuth``.
-                        refreshed = reauth()
-                        if refreshed:
+                        refreshed = _refreshed_auth_headers(headers, refresh_headers, reauth)
+                        if refreshed is not None:
                             headers = refreshed
                             reauthed = True
                             print(
@@ -830,7 +890,7 @@ def _post_hook_with_reattach(
                     return resp
             except httpx.HTTPStatusError as exc:
                 if (
-                    reauth is not None
+                    (reauth is not None or refresh_headers is not None)
                     and parked
                     and _is_login_redirect_or_unauthorized(exc.response)
                 ):
@@ -979,6 +1039,9 @@ def _main_permission_request(argv: list[str]) -> int:
         "claude permission",
         reauth=policy_hook_reauth(ap_server_url, headers),
         wait_marker=approval_wait_marker_path(session_id, bridge_dir=bridge_dir),
+        # The runner rewrites this file's bearer every minute; re-read it so a
+        # park longer than the token lifetime recovers on its own.
+        refresh_headers=lambda: _bridge_auth_headers(bridge_dir),
     )
     if resp is None:
         return 0

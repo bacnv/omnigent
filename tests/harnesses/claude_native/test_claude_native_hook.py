@@ -3355,3 +3355,102 @@ def test_route_turn_follows_a_clear_rotation_onto_the_new_session(
     assert _run_route_turn(bridge_dir, {"prompt": "hello"}, monkeypatch) == 0
     assert urls == ["http://127.0.0.1:54321/v1/sessions/conv_replacement/route-turn"]
     assert turn_routing_marker_session(bridge_dir) == "conv_replacement"
+
+
+def test_permission_request_hook_rereads_bridge_token_after_401(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    A parked hook recovers when the runner refreshes the bridge token.
+
+    The hook snapshots ``ap_auth_headers`` at launch, but the runner rewrites
+    ``permission_hook.json`` every minute and the bearer lasts ~30 min. A
+    prompt parked longer than that used to POST the dead token every 30s for
+    up to a day: the server answered 401 forever, so the approval card never
+    reached the web UI and the prompt fell back to Claude's TUI. Re-reading
+    the file on rejection is what lets the card appear at all.
+    """
+    seen_tokens: list[str] = []
+
+    class _RotatingTokenClient:
+        """
+        Accept the refreshed bearer, reject the launch-time snapshot.
+
+        :param headers: Headers passed to :class:`httpx.Client`.
+        :param timeout: Timeout passed to :class:`httpx.Client`.
+        """
+
+        def __init__(self, *, headers: dict[str, str], timeout: object) -> None:
+            """
+            Capture the headers this attempt would send.
+
+            :param headers: HTTP headers for AP.
+            :param timeout: HTTP timeout object.
+            :returns: None.
+            """
+            del timeout
+            self._headers = headers
+
+        def __enter__(self) -> _RotatingTokenClient:
+            """
+            Enter the context manager.
+
+            :returns: This fake client.
+            """
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            """
+            Exit the context manager.
+
+            :param args: Exception details.
+            :returns: None.
+            """
+            del args
+
+        def post(self, url: str, *, json: dict[str, object]) -> httpx.Response:
+            """
+            Reject the stale token, accept the runner-refreshed one.
+
+            :param url: Target Omnigent URL.
+            :param json: Request JSON body.
+            :returns: HTTP response object.
+            """
+            del json
+            token = self._headers.get("Authorization", "")
+            seen_tokens.append(token)
+            request = httpx.Request("POST", url, headers=self._headers)
+            if token == "Bearer stale":
+                return httpx.Response(401, text="Unauthorized", request=request)
+            return httpx.Response(200, text="", request=request)
+
+    monkeypatch.setattr(native_policy_hook.httpx, "Client", _RotatingTokenClient)
+    monkeypatch.setattr(claude_native_hook, "_PERMISSION_RETRY_INITIAL_BACKOFF_S", 0.0)
+    bridge_dir = _prepare_permission_bridge(tmp_path, "conv_refresh")
+    # The runner's refresh loop has since rewritten the file with a live token.
+    build_hook_settings(
+        bridge_dir,
+        ap_server_url="http://127.0.0.1:8787",
+        ap_auth_headers={"Authorization": "Bearer fresh"},
+    )
+    payload = {"hook_event_name": "PermissionRequest", "tool_name": "Bash"}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+
+    # Launch snapshot is the pre-rotation token the hook captured at start.
+    exit_code = claude_native_hook.main(
+        [
+            "permission-request",
+            "--bridge-dir",
+            str(bridge_dir),
+            "--omnigent-auth-headers-json",
+            json.dumps({"Authorization": "Bearer stale"}),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert seen_tokens == ["Bearer stale", "Bearer fresh"], seen_tokens
+    assert "re-minted token" in captured.err
+    assert captured.out == ""
