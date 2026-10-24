@@ -8226,6 +8226,67 @@ def _build_claude_native_base_args(
     return tuple(args)
 
 
+def _gateway_breaks_claude_auto_mode(base_url: str | None) -> bool:
+    """
+    Whether *base_url* is a non-Anthropic inference endpoint that cannot serve auto mode.
+
+    Claude Code's ``auto`` permission mode classifies each risky tool call
+    against an Anthropic-hosted endpoint that proxies don't implement. Pointed
+    at a gateway, the classifier request never returns and the turn hangs with
+    no ApprovalCard — the failure this guard exists to prevent.
+
+    :param base_url: The launch ``ANTHROPIC_BASE_URL``, or ``None`` when unset
+        (a direct Anthropic or subscription login).
+    :returns: ``True`` iff inference is proxied somewhere other than Anthropic.
+    """
+    if not base_url:
+        return False
+    from urllib.parse import urlparse
+
+    hostname = (urlparse(base_url).hostname or "").lower()
+    if not hostname:
+        return False
+    return not (hostname == "anthropic.com" or hostname.endswith(".anthropic.com"))
+
+
+def _drop_gateway_auto_permission_mode(
+    args: tuple[str, ...],
+    *,
+    base_url: str | None,
+    session_id: str,
+) -> tuple[str, ...]:
+    """
+    Rewrite ``--permission-mode auto`` to ``default`` when inference is proxied.
+
+    A spec declaring ``permission_mode: auto`` (or a picker choice) reaches this
+    launch even though the classifier behind it cannot answer through a
+    gateway. Rather than launch a session that hangs on its first risky tool,
+    fall back to the prompting mode and say so once.
+
+    :param args: Assembled base Claude args, e.g. ``("--permission-mode", "auto")``.
+    :param base_url: The launch ``ANTHROPIC_BASE_URL``.
+    :param session_id: Session id, for the warning.
+    :returns: *args* unchanged when the guard does not apply, else the same
+        args with ``auto`` replaced by ``default``.
+    """
+    from omnigent.harnesses.claude_native.bridge import _arg_value
+
+    if _arg_value(args, "--permission-mode") != "auto":
+        return args
+    if not _gateway_breaks_claude_auto_mode(base_url):
+        return args
+    rewritten = list(args)
+    rewritten[rewritten.index("--permission-mode") + 1] = "default"
+    _logger.warning(
+        "claude-native session=%s asked for auto permission mode but inference is "
+        "gateway-backed (ANTHROPIC_BASE_URL=%s); auto mode's classifier cannot run "
+        "there and the turn would hang. Launching in default (prompting) mode instead.",
+        session_id,
+        base_url,
+    )
+    return tuple(rewritten)
+
+
 def _claude_terminal_env_unset(
     claude_config: ClaudeNativeUcodeConfig | None,
 ) -> list[str]:
@@ -9761,25 +9822,31 @@ async def _auto_create_claude_terminal(
         launch_model,
         extra={"session_id": session_id},
     )
-    base_claude_args = _build_claude_native_base_args(
-        reasoning_effort=session_effort,
-        # Precedence: per-session ``/model`` override > agent-spec pin
-        # (``executor.model``) > provider/ucode default. All three yield to an
-        # explicit ``--model`` in the user's pass-through args (handled in the
-        # helper).
-        model_override=launch_model,
-        terminal_launch_args=session_launch_args,
-        resume_external_session_id=resume_external_session_id,
-        skip_initial_prompt=await _claude_legacy_prompt_consumed(
-            server_client=server_client,
-            session_id=session_id,
+    base_claude_args = _drop_gateway_auto_permission_mode(
+        _build_claude_native_base_args(
+            reasoning_effort=session_effort,
+            # Precedence: per-session ``/model`` override > agent-spec pin
+            # (``executor.model``) > provider/ucode default. All three yield to an
+            # explicit ``--model`` in the user's pass-through args (handled in the
+            # helper).
+            model_override=launch_model,
             terminal_launch_args=session_launch_args,
-            has_prior_history=(
-                session_external_id is not None
-                or fork_source_external_id is not None
-                or fork_carry_history
+            resume_external_session_id=resume_external_session_id,
+            skip_initial_prompt=await _claude_legacy_prompt_consumed(
+                server_client=server_client,
+                session_id=session_id,
+                terminal_launch_args=session_launch_args,
+                has_prior_history=(
+                    session_external_id is not None
+                    or fork_source_external_id is not None
+                    or fork_carry_history
+                ),
             ),
         ),
+        base_url=claude_config.env.get("ANTHROPIC_BASE_URL")
+        if claude_config is not None
+        else None,
+        session_id=session_id,
     )
 
     # Pass ``ap_server_url`` so ``build_hook_settings`` registers the
