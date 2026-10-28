@@ -214,7 +214,7 @@ async def _refresh_claude_permission_hook_auth(
             if token:
                 headers = databricks_request_headers(server_url, bearer_token=token)
                 update_permission_hook_auth_headers(bridge_dir, headers)
-        except Exception:  # noqa: BLE001 — retry without stopping the terminal
+        except Exception:
             _logger.debug("Could not refresh Claude permission-hook auth", exc_info=True)
 
 
