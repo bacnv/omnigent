@@ -118,7 +118,7 @@ async def test_owner_gets_host_inventory(
 
 async def test_account_state_reaches_the_caller_through_the_tunnel(mcp_app) -> None:
     """The route publishes what the host reported, decoded the way the tunnel decodes it."""
-    app, registry, _ = mcp_app
+    app, registry, _, _ = mcp_app
     conn = _register(registry, CAP_MCP_INVENTORY)
     reported = {
         **_GITHUB,
