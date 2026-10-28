@@ -3299,7 +3299,7 @@ export function NewChatLandingScreen() {
     useSandboxUnsupportedAgents(
       previewSandboxProvider,
       sandboxPreviewEntries,
-      cacheUser,
+      resolvedUserId,
       sandboxPreviewsOffered,
     );
   const sandboxBlockedReasons = useMemo(
