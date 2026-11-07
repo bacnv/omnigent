@@ -385,11 +385,11 @@ async def test_host_discovery_follows_the_admin_owned_host_rule(
                 headers={"x-test-user": "reader"},
             )
         )
-        # Let the request clear its owner check before inspecting the tunnel.
-        await asyncio.sleep(0.05)
         live = registry.get(_HOST_ID)
         assert live is not None
         if status != 200:
+            # Awaiting the request is the condition: it has finished being
+            # rejected by then, so an empty tunnel is meaningful.
             response = await task
             assert response.status_code == status
             assert live.outbound_queue.empty()
