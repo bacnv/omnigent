@@ -8243,10 +8243,49 @@ def _gateway_breaks_claude_auto_mode(base_url: str | None) -> bool:
         return False
     from urllib.parse import urlparse
 
-    hostname = (urlparse(base_url).hostname or "").lower()
+    try:
+        hostname = (urlparse(base_url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        # A malformed URL (``http://[bad``) still means "not Anthropic", and
+        # must not abort the launch.
+        return True
     if not hostname:
-        return False
+        # Scheme-less values (``gateway:8080``) parse as a path, so the host is
+        # unknown; treat an explicit base URL as proxied rather than fail open.
+        return True
     return not (hostname == "anthropic.com" or hostname.endswith(".anthropic.com"))
+
+
+def _claude_launch_base_url(claude_config: ClaudeNativeUcodeConfig | None) -> str | None:
+    """
+    The ``ANTHROPIC_BASE_URL`` a claude-native launch will actually inherit.
+
+    A resolved config wins, but ``None`` does not mean "Anthropic": it is also
+    what ``resolve_native_claude_config`` returns when managed settings pin a
+    gateway, and the pane still inherits the ambient/user/env base URL either
+    way. Read the same layers Claude Code reads, so a guarded decision isn't
+    made on a URL the launch never uses.
+
+    :param claude_config: The resolved launch config, or ``None``.
+    :returns: The effective base URL, or ``None`` when the launch is direct.
+    """
+    from omnigent.harnesses.claude_native.main import (
+        _UCODE_CLAUDE_BASE_URL_ENV,
+        claude_ambient_transport,
+        managed_claude_gateway_signal,
+    )
+
+    if claude_config is not None:
+        configured = claude_config.env.get(_UCODE_CLAUDE_BASE_URL_ENV)
+        if configured:
+            return configured
+    managed_base_url, _ = managed_claude_gateway_signal()
+    if managed_base_url:
+        return managed_base_url
+    for name, value in claude_ambient_transport().env:
+        if name == _UCODE_CLAUDE_BASE_URL_ENV and value:
+            return value
+    return None
 
 
 def _drop_gateway_auto_permission_mode(
@@ -8264,7 +8303,8 @@ def _drop_gateway_auto_permission_mode(
     fall back to the prompting mode and say so once.
 
     :param args: Assembled base Claude args, e.g. ``("--permission-mode", "auto")``.
-    :param base_url: The launch ``ANTHROPIC_BASE_URL``.
+    :param base_url: The effective launch ``ANTHROPIC_BASE_URL`` (see
+        :func:`_claude_launch_base_url`).
     :param session_id: Session id, for the warning.
     :returns: *args* unchanged when the guard does not apply, else the same
         args with ``auto`` replaced by ``default``.
@@ -8275,16 +8315,55 @@ def _drop_gateway_auto_permission_mode(
         return args
     if not _gateway_breaks_claude_auto_mode(base_url):
         return args
-    rewritten = list(args)
-    rewritten[rewritten.index("--permission-mode") + 1] = "default"
+    # Rewrite both spellings ``_arg_value`` accepts, so the guard cannot fire on
+    # a value it then fails to replace (``--permission-mode=auto``). The bare
+    # form takes the next arg as its value only when that arg is not a flag,
+    # matching ``_arg_value``: otherwise it is left alone rather than overwriting
+    # a following flag.
+    rewritten: list[str] = []
+    idx = 0
+    while idx < len(args):
+        arg = args[idx]
+        if arg == "--permission-mode=auto":
+            rewritten.append("--permission-mode=default")
+        elif (
+            arg == "--permission-mode"
+            and idx + 1 < len(args)
+            and not args[idx + 1].startswith("--")
+        ):
+            rewritten.extend((arg, "default"))
+            idx += 1  # consume the replaced value
+        else:
+            rewritten.append(arg)
+        idx += 1
     _logger.warning(
         "claude-native session=%s asked for auto permission mode but inference is "
-        "gateway-backed (ANTHROPIC_BASE_URL=%s); auto mode's classifier cannot run "
+        "gateway-backed (at %s); auto mode's classifier cannot run "
         "there and the turn would hang. Launching in default (prompting) mode instead.",
         session_id,
-        base_url,
+        _endpoint_origin_for_log(base_url),
     )
     return tuple(rewritten)
+
+
+def _endpoint_origin_for_log(base_url: str | None) -> str:
+    """
+    Reduce a base URL to its origin so credentials and query strings stay out of logs.
+
+    :param base_url: The effective base URL, or ``None``.
+    :returns: ``scheme://host[:port]``, or ``"an unnamed endpoint"`` when there
+        is no usable URL.
+    """
+    from omnigent.harnesses.claude_native.main import _endpoint_origin
+
+    if not base_url:
+        return "an unnamed endpoint"
+    try:
+        origin = _endpoint_origin(base_url)
+    except ValueError:
+        return "an unparseable endpoint"
+    # ``_endpoint_origin`` returns the input unchanged when it has no scheme.
+    return origin if "//" in origin else "an unnamed endpoint"
 
 
 def _claude_terminal_env_unset(
@@ -9843,9 +9922,7 @@ async def _auto_create_claude_terminal(
                 ),
             ),
         ),
-        base_url=claude_config.env.get("ANTHROPIC_BASE_URL")
-        if claude_config is not None
-        else None,
+        base_url=_claude_launch_base_url(claude_config),
         session_id=session_id,
     )
 
