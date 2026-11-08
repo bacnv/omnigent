@@ -634,6 +634,12 @@ async def test_managed_create_routes_to_reserved_host_through_auth_retry(monkeyp
             "https://eu.api.anthropic.com/v1",
             ("--permission-mode", "auto"),
         ),
+        # A trailing root dot and mixed case are the same Anthropic host.
+        (
+            ("--permission-mode", "auto"),
+            "https://API.ANTHROPIC.COM./v1",
+            ("--permission-mode", "auto"),
+        ),
         # Any other endpoint is a proxy: auto would hang, fall back to prompting.
         (
             ("--permission-mode", "auto"),
@@ -645,17 +651,50 @@ async def test_managed_create_routes_to_reserved_host_through_auth_retry(monkeyp
             "https://w.ai-gateway.cloud.databricks.com/anthropic",
             ("--permission-mode", "default"),
         ),
-        # Only auto is rewritten; other modes and adjacent flags are untouched.
+        # A look-alike host must not pass as Anthropic.
+        (
+            ("--permission-mode", "auto"),
+            "https://anthropic.com.evil.test/v1",
+            ("--permission-mode", "default"),
+        ),
+        # Malformed or scheme-less base URLs count as proxied, not as Anthropic.
+        (("--permission-mode", "auto"), "http://[bad", ("--permission-mode", "default")),
+        (("--permission-mode", "auto"), "gateway:8080", ("--permission-mode", "default")),
+        # Only auto is rewritten; other modes pass through untouched.
         (
             ("--permission-mode", "acceptEdits"),
             "http://gateway/v1",
             ("--permission-mode", "acceptEdits"),
         ),
         (("--model", "opus"), "http://gateway/v1", ("--model", "opus")),
+        # Both flag spellings rewrite: the joined form must not raise.
+        (
+            ("--permission-mode=auto",),
+            "http://192.168.61.233:20128/v1",
+            ("--permission-mode=default",),
+        ),
+        (
+            ("--permission-mode=auto", "--model", "opus"),
+            "http://gateway/v1",
+            ("--permission-mode=default", "--model", "opus"),
+        ),
         (
             ("--permission-mode", "auto", "--model", "opus"),
             "http://gateway/v1",
             ("--permission-mode", "default", "--model", "opus"),
+        ),
+        # Repeated flags: the last is the effective one, and both are rewritten so
+        # no occurrence can leave auto active.
+        (
+            ("--permission-mode", "auto", "--permission-mode", "auto"),
+            "http://gateway/v1",
+            ("--permission-mode", "default", "--permission-mode", "default"),
+        ),
+        # A bare flag with no value must not swallow the following flag.
+        (
+            ("--permission-mode", "--model", "opus", "--permission-mode", "auto"),
+            "http://gateway/v1",
+            ("--permission-mode", "--model", "opus", "--permission-mode", "default"),
         ),
     ],
 )
@@ -666,3 +705,27 @@ def test_gateway_rewrites_auto_permission_mode_to_default(args, base_url, expect
     assert (
         _drop_gateway_auto_permission_mode(args, base_url=base_url, session_id="sid") == expected
     )
+
+
+def test_claude_launch_base_url_reads_the_ambient_env(monkeypatch):
+    """An unconfigured launch still inherits the ambient base URL, so the guard must see it."""
+    from omnigent.runner.native import orchestration
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://192.168.61.233:20128/v1")
+    assert orchestration._claude_launch_base_url(None) == "http://192.168.61.233:20128/v1"
+
+
+def test_gateway_auto_warning_hides_credentials(caplog):
+    """The warning names the endpoint origin, never a userinfo or query string."""
+    from omnigent.runner.native.orchestration import _drop_gateway_auto_permission_mode
+
+    with caplog.at_level("WARNING"):
+        _drop_gateway_auto_permission_mode(
+            ("--permission-mode", "auto"),
+            base_url="https://user:secret@gw.example/anthropic?sig=abc",
+            session_id="sid",
+        )
+
+    assert "https://gw.example" in caplog.text
+    assert "secret" not in caplog.text
+    assert "sig=abc" not in caplog.text
