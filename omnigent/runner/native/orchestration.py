@@ -8295,25 +8295,41 @@ def _drop_gateway_auto_permission_mode(
     session_id: str,
 ) -> tuple[str, ...]:
     """
-    Rewrite ``--permission-mode auto`` to ``default`` when inference is proxied.
+    Pin a gateway-backed launch to ``default`` unless it names a working mode.
 
-    A spec declaring ``permission_mode: auto`` (or a picker choice) reaches this
-    launch even though the classifier behind it cannot answer through a
-    gateway. Rather than launch a session that hangs on its first risky tool,
-    fall back to the prompting mode and say so once.
+    Two paths land a launch in auto mode, whose classifier cannot answer
+    through a proxy gateway: a spec declaring ``permission_mode: auto`` (or a
+    picker choice), and no mode at all, which Claude Code 2.1.3xx resolves to
+    auto on its own. Both become ``default``, so the session prompts through
+    the web UI instead of hanging on its first risky tool.
 
     :param args: Assembled base Claude args, e.g. ``("--permission-mode", "auto")``.
     :param base_url: The effective launch ``ANTHROPIC_BASE_URL`` (see
         :func:`_claude_launch_base_url`).
     :param session_id: Session id, for the warning.
     :returns: *args* unchanged when the guard does not apply, else the same
-        args with ``auto`` replaced by ``default``.
+        args pinned to ``default``.
     """
     from omnigent.harnesses.claude_native.bridge import _arg_value
 
-    if _arg_value(args, "--permission-mode") != "auto":
-        return args
+    effective = _arg_value(args, "--permission-mode")
     if not _gateway_breaks_claude_auto_mode(base_url):
+        return args
+    if effective is None:
+        # Claude Code 2.1.3xx defaults to ``auto`` when the flag is absent
+        # (verified by reading the pane footer: no flag renders "auto mode on").
+        # An agent spec with no ``permission_mode`` therefore lands in auto on
+        # every launch, and the classifier behind it cannot answer through a
+        # gateway — so pin the prompting mode explicitly.
+        _logger.warning(
+            "claude-native session=%s launched without a permission mode; Claude Code "
+            "defaults to auto, whose classifier cannot run through the gateway at %s. "
+            "Pinning --permission-mode default.",
+            session_id,
+            _endpoint_origin_for_log(base_url),
+        )
+        return (*args, "--permission-mode", "default")
+    if effective != "auto":
         return args
     # Rewrite both spellings ``_arg_value`` accepts, so the guard cannot fire on
     # a value it then fails to replace (``--permission-mode=auto``). The bare

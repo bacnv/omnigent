@@ -660,13 +660,27 @@ async def test_managed_create_routes_to_reserved_host_through_auth_retry(monkeyp
         # Malformed or scheme-less base URLs count as proxied, not as Anthropic.
         (("--permission-mode", "auto"), "http://[bad", ("--permission-mode", "default")),
         (("--permission-mode", "auto"), "gateway:8080", ("--permission-mode", "default")),
+        # No mode at all: Claude Code's own default is auto, so pin the
+        # prompting mode rather than let the launch hang.
+        ((), "http://192.168.61.233:20128/v1", ("--permission-mode", "default")),
+        (
+            ("--model", "opus"),
+            "http://gateway/v1",
+            ("--model", "opus", "--permission-mode", "default"),
+        ),
+        ((), None, ()),
+        ((), "https://api.anthropic.com/v1", ()),
         # Only auto is rewritten; other modes pass through untouched.
         (
             ("--permission-mode", "acceptEdits"),
             "http://gateway/v1",
             ("--permission-mode", "acceptEdits"),
         ),
-        (("--model", "opus"), "http://gateway/v1", ("--model", "opus")),
+        (
+            ("--model", "opus"),
+            "http://gateway/v1",
+            ("--model", "opus", "--permission-mode", "default"),
+        ),
         # Both flag spellings rewrite: the joined form must not raise.
         (
             ("--permission-mode=auto",),
