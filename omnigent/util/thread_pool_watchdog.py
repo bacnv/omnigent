@@ -21,7 +21,6 @@ from time import monotonic, sleep
 from types import FrameType
 from typing import Literal
 
-import omnigent
 from omnigent.debug_logging import CAPTURED_STACK_TRACE_FIELD, debug_event
 from omnigent.util.event_loop_watchdog import _capture_stack
 
@@ -29,7 +28,10 @@ _logger = logging.getLogger(__name__)
 _MAX_REPORT_STACK_BYTES = 32768
 _MAX_SUMMARY_LOCATIONS = 5
 # Parent of the omnigent package, so locations read "omnigent/x.py:12 in fn".
-_PACKAGE_PARENT = str(Path(omnigent.__file__).resolve().parent.parent) + os.sep
+# Derived from this file, never from ``omnigent.__file__``: ``python -m`` puts
+# the cwd first on sys.path, so a checkout without ``__init__.py`` shadows the
+# package as a namespace and leaves ``__file__`` None.
+_PACKAGE_PARENT = str(Path(__file__).resolve().parents[2]) + os.sep
 _PACKAGE_ROOT = _PACKAGE_PARENT + "omnigent" + os.sep
 _STDLIB_ROOT = str(Path(sysconfig.get_paths()["stdlib"]).resolve()) + os.sep
 
