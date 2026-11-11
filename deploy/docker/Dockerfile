@@ -122,12 +122,21 @@ WORKDIR /build
 
 # Manifests + SDK path-deps first so the install layer caches across
 # pure source edits.
-COPY pyproject.toml setup.py ./
+# uv.toml carries the dependency cooldown that uv.lock records as
+# `exclude-newer-span`; without it `uv sync --locked` sees the lock as stale.
+COPY pyproject.toml setup.py uv.lock uv.toml ./
 # License + third-party attribution travel into the published images (the host
 # and runtime targets COPY /build below), since the image redistributes the
 # dependency bytes baked in by the install step.
 COPY LICENSE NOTICE ./
 COPY sdks/ ./sdks/
+# A path dependency in [tool.uv.sources] for the opt-in `slack` extra. uv
+# resolves every source in the lock even when the extra isn't requested, so
+# `uv sync --locked` fails without it.
+COPY integrations/ ./integrations/
+# A uv workspace member ([tool.uv.workspace]); the lock lists it, so
+# `uv sync --locked` needs it present to resolve.
+COPY .github/triage_v2/ ./.github/triage_v2/
 COPY omnigent/ ./omnigent/
 # The built-in polly agent's packaged bundle (omnigent/resources/examples/
 # polly) is a symlink into the top-level examples/ tree. Ship examples/ so the
@@ -143,11 +152,16 @@ RUN python -m venv /opt/venv
 ENV VIRTUAL_ENV=/opt/venv \
     PATH="/opt/venv/bin:${PATH}"
 
-# Install omnigent. Editable install (-e) is required because
-# pyproject.toml declares the sibling SDKs as editable path deps via
-# [tool.uv.sources]. The runtime stages preserve /build/ so the venv's
-# .pth references stay valid.
-RUN uv pip install --no-cache-dir --index-url ${PYPI_INDEX_URL} -e .
+# Install dependencies from uv.lock (--locked fails the build if the lock is
+# stale) so the image runs the versions CI tests, not whatever resolution
+# picks on build day. UV_PROJECT_ENVIRONMENT points the sync at /opt/venv.
+RUN UV_PROJECT_ENVIRONMENT=/opt/venv \
+    uv sync --locked --no-install-project --index-url ${PYPI_INDEX_URL}
+# Install omnigent itself editable: pyproject.toml's sibling SDKs resolve as
+# editable path deps via [tool.uv.sources], and the runtime stages keep
+# /build/ so the venv's .pth references stay valid. A plain sync would install
+# a non-editable wheel whose code path the entrypoint cannot import.
+RUN uv pip install --no-cache-dir --no-deps --index-url ${PYPI_INDEX_URL} -e .
 
 # ── Server builder ──────────────────────────────────────
 # Server-only additions on top of the shared builder: the SPA bundle
@@ -172,8 +186,19 @@ RUN uv pip install --no-cache-dir --index-url ${PYPI_INDEX_URL} 'psycopg[binary]
 # kubernetes`). Off by default; the runner host image needs none of these. Build
 # with `--build-arg OMNIGENT_EXTRAS=kubernetes` (comma-separate for several).
 ARG OMNIGENT_EXTRAS=
+# `uv export` renders the same locked versions as a flat requirement list, so
+# an extra cannot re-resolve (or, as `uv sync` would, uninstall the editable
+# project it does not see as installed).
 RUN if [ -n "${OMNIGENT_EXTRAS}" ]; then \
-        uv pip install --no-cache-dir --index-url ${PYPI_INDEX_URL} -e ".[${OMNIGENT_EXTRAS}]"; \
+        set -eu; \
+        extras=""; \
+        for name in $(echo "${OMNIGENT_EXTRAS}" | tr ',' ' '); do \
+            extras="${extras} --extra ${name}"; \
+        done; \
+        uv export --locked --no-dev --no-emit-project --format requirements-txt \
+            ${extras} > /tmp/extra-reqs.txt; \
+        uv pip install --no-cache-dir --index-url ${PYPI_INDEX_URL} \
+            -r /tmp/extra-reqs.txt; \
     fi
 
 # ── Node alias stage ─────────────────────────────────────
