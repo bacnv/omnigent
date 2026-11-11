@@ -274,3 +274,30 @@ def test_rejects_unusable_intervals(
             probe_interval_s=probe_interval_s,
             report_interval_s=report_interval_s,
         )
+
+
+def test_package_paths_survive_a_shadowing_namespace_package(tmp_path, monkeypatch):
+    """`python -m` from a parent of the checkout leaves ``omnigent.__file__`` None.
+
+    A repo checkout has no ``__init__.py`` at its root, so running from that
+    root shadows the installed package with a namespace one. The module-level
+    path derivation must come from this file, not from ``omnigent.__file__``.
+    """
+    # Simulate the shadowing: a namespace package whose __file__ is None.
+    import sys
+    import types
+
+    from omnigent.util import thread_pool_watchdog
+
+    fake = types.ModuleType("omnigent")
+    fake.__file__ = None
+    fake.__path__ = list(thread_pool_watchdog.__dict__.get("__path__", [])) or ["/nonexistent"]
+    monkeypatch.setitem(sys.modules, "omnigent", fake)
+
+    # Re-import the module's own path constants as it would on a fresh start.
+    import importlib
+
+    reloaded = importlib.reload(thread_pool_watchdog)
+    assert reloaded._PACKAGE_PARENT != "None"
+    assert reloaded._PACKAGE_ROOT.endswith("omnigent/")
+    assert reloaded._PACKAGE_ROOT.startswith(reloaded._PACKAGE_PARENT)
