@@ -4,6 +4,9 @@
 .git
 .gitignore
 .github
+# Keep the uv workspace member: pyproject.toml declares .github/triage_v2 as
+# a workspace member, so `uv sync --locked` cannot resolve the lock without it.
+!.github/triage_v2
 .vscode
 .idea
 
